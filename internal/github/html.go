@@ -7,21 +7,24 @@ import (
 )
 
 var (
-	reCodeBlock = regexp.MustCompile("(?s)```[a-zA-Z]*\n?(.*?)```")
-	reInline    = regexp.MustCompile("`([^`]+)`")
-	reBold      = regexp.MustCompile(`\*\*(.+?)\*\*`)
-	reItalic    = regexp.MustCompile(`(?:^|[^*])\*([^*]+?)\*(?:[^*]|$)`)
-	reLink      = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
-	reImage     = regexp.MustCompile(`!\[([^\]]*)\]\([^)]+\)`)
-	reHeading   = regexp.MustCompile(`(?m)^#{1,6}\s+(.+)$`)
+	reCodeBlock  = regexp.MustCompile("(?s)```[a-zA-Z]*\n?(.*?)```")
+	reInline     = regexp.MustCompile("`([^`]+)`")
+	reBold       = regexp.MustCompile(`\*\*(.+?)\*\*`)
+	reItalic     = regexp.MustCompile(`(?:^|[^*])\*([^*]+?)\*(?:[^*]|$)`)
+	reLink       = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
+	reImage      = regexp.MustCompile(`!\[([^\]]*)\]\(([^)]+)\)`)
+	reHTMLImg    = regexp.MustCompile(`(?i)<img\s[^>]*src=["']([^"']+)["'][^>]*/?>`)
+	reHeading    = regexp.MustCompile(`(?m)^#{1,6}\s+(.+)$`)
 	reBlockquote = regexp.MustCompile(`(?m)^>\s?(.*)$`)
-	reCheckbox  = regexp.MustCompile(`(?m)^- \[([ xX])\] `)
-	reIssueRef  = regexp.MustCompile(`(?:^|[^&\w])#(\d+)\b`)
-	reCommitSHA = regexp.MustCompile(`\b([0-9a-f]{7,40})\b`)
+	reCheckbox   = regexp.MustCompile(`(?m)^- \[([ xX])\] `)
+	reIssueRef   = regexp.MustCompile(`(?:^|[^&\w])#(\d+)\b`)
+	reCommitSHA  = regexp.MustCompile(`\b([0-9a-f]{7,40})\b`)
 )
 
 // mdToTelegramHTML converts GitHub-flavored Markdown to Telegram-compatible HTML.
-func mdToTelegramHTML(md, repo string) string {
+// It returns the converted HTML and any image URLs extracted from the Markdown.
+func mdToTelegramHTML(md, repo string) (string, []string) {
+	var imageURLs []string
 	// Protect code blocks by replacing with placeholders
 	var codeBlocks []string
 	s := reCodeBlock.ReplaceAllStringFunc(md, func(match string) string {
@@ -44,8 +47,19 @@ func mdToTelegramHTML(md, repo string) string {
 	var blockquotes []string
 	s = groupBlockquotesWithPlaceholders(s, &blockquotes)
 
-	// Strip images (before link processing)
-	s = reImage.ReplaceAllString(s, "$1")
+	// Extract and strip markdown images (before link processing)
+	s = reImage.ReplaceAllStringFunc(s, func(match string) string {
+		parts := reImage.FindStringSubmatch(match)
+		imageURLs = append(imageURLs, parts[2])
+		return ""
+	})
+
+	// Extract and strip HTML <img> tags
+	s = reHTMLImg.ReplaceAllStringFunc(s, func(match string) string {
+		parts := reHTMLImg.FindStringSubmatch(match)
+		imageURLs = append(imageURLs, parts[1])
+		return ""
+	})
 
 	// Convert links before escaping (URLs contain & etc.)
 	var links []string
@@ -106,7 +120,12 @@ func mdToTelegramHTML(md, repo string) string {
 		s = strings.Replace(s, fmt.Sprintf("\x00BLOCKQUOTE%d\x00", i), bq, 1)
 	}
 
-	return strings.TrimSpace(s)
+	// Collapse runs of 3+ newlines into 2 (single blank line)
+	for strings.Contains(s, "\n\n\n") {
+		s = strings.ReplaceAll(s, "\n\n\n", "\n\n")
+	}
+
+	return strings.TrimSpace(s), imageURLs
 }
 
 // groupBlockquotesWithPlaceholders extracts consecutive `> ` lines, converts them to

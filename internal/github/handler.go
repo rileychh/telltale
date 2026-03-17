@@ -25,6 +25,14 @@ func NewHandler(secret string, tg *telegram.Bot, db *store.Store) *Handler {
 	}
 }
 
+// send sends an HTML message, using a photo or media group when images are present.
+func (h *Handler) send(ctx context.Context, html string, imageURLs []string) (int, error) {
+	if len(imageURLs) == 0 {
+		return h.tg.Send(ctx, html)
+	}
+	return h.tg.SendPhotos(ctx, imageURLs, html)
+}
+
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	payload, err := gh.ValidatePayload(r, h.secret)
 	if err != nil {
@@ -83,13 +91,16 @@ func (h *Handler) handleIssue(ctx context.Context, e *gh.IssuesEvent) {
 		issue.GetHTMLURL(), repo, issue.GetNumber(), escapeHTML(issue.GetTitle()),
 	)
 
+	var imageURLs []string
 	if action == "opened" {
 		if body := issue.GetBody(); body != "" {
-			html += "\n\n" + mdToTelegramHTML(body, repo)
+			converted, imgs := mdToTelegramHTML(body, repo)
+			html += "\n\n" + converted
+			imageURLs = imgs
 		}
 	}
 
-	msgID, err := h.tg.Send(ctx, html)
+	msgID, err := h.send(ctx, html, imageURLs)
 	if err != nil {
 		log.Printf("failed to send issue notification: %v", err)
 		return
@@ -136,13 +147,16 @@ func (h *Handler) handlePullRequest(ctx context.Context, e *gh.PullRequestEvent)
 		pr.GetHTMLURL(), repo, pr.GetNumber(), escapeHTML(pr.GetTitle()),
 	)
 
+	var imageURLs []string
 	if action == "opened" {
 		if body := pr.GetBody(); body != "" {
-			html += "\n\n" + mdToTelegramHTML(body, repo)
+			converted, imgs := mdToTelegramHTML(body, repo)
+			html += "\n\n" + converted
+			imageURLs = imgs
 		}
 	}
 
-	msgID, err := h.tg.Send(ctx, html)
+	msgID, err := h.send(ctx, html, imageURLs)
 	if err != nil {
 		log.Printf("failed to send PR notification: %v", err)
 		return
@@ -178,11 +192,14 @@ func (h *Handler) handleIssueComment(ctx context.Context, e *gh.IssueCommentEven
 		comment.GetHTMLURL(), repo, issue.GetNumber(), escapeHTML(issue.GetTitle()),
 	)
 
+	var imageURLs []string
 	if body := comment.GetBody(); body != "" {
-		html += "\n\n" + mdToTelegramHTML(body, repo)
+		converted, imgs := mdToTelegramHTML(body, repo)
+		html += "\n\n" + converted
+		imageURLs = imgs
 	}
 
-	msgID, err := h.tg.Send(ctx, html)
+	msgID, err := h.send(ctx, html, imageURLs)
 	if err != nil {
 		log.Printf("failed to send comment notification: %v", err)
 		return
@@ -221,11 +238,14 @@ func (h *Handler) handlePullRequestReview(ctx context.Context, e *gh.PullRequest
 		review.GetHTMLURL(), repo, pr.GetNumber(), escapeHTML(pr.GetTitle()),
 	)
 
+	var imageURLs []string
 	if body := review.GetBody(); body != "" {
-		html += "\n\n" + mdToTelegramHTML(body, repo)
+		converted, imgs := mdToTelegramHTML(body, repo)
+		html += "\n\n" + converted
+		imageURLs = imgs
 	}
 
-	msgID, err := h.tg.Send(ctx, html)
+	msgID, err := h.send(ctx, html, imageURLs)
 	if err != nil {
 		log.Printf("failed to send review notification: %v", err)
 		return

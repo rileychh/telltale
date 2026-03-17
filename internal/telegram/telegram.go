@@ -55,6 +55,44 @@ func (b *Bot) Send(ctx context.Context, html string) (int, error) {
 	return msg.ID, nil
 }
 
+// SendPhotos sends one or more photos with an HTML caption to the configured chat.
+// The caption is truncated to 1024 characters (Telegram's limit) and attached to the first photo.
+// Returns the message ID of the first photo.
+func (b *Bot) SendPhotos(ctx context.Context, urls []string, caption string) (int, error) {
+	if len([]rune(caption)) > 1024 {
+		caption = string([]rune(caption)[:1021]) + "..."
+	}
+	if len(urls) == 1 {
+		msg, err := b.bot.SendPhoto(ctx, &bot.SendPhotoParams{
+			ChatID:    b.chatID,
+			Photo:     &models.InputFileString{Data: urls[0]},
+			Caption:   caption,
+			ParseMode: models.ParseModeHTML,
+		})
+		if err != nil {
+			return 0, err
+		}
+		return msg.ID, nil
+	}
+	media := make([]models.InputMedia, len(urls))
+	for i, u := range urls {
+		p := &models.InputMediaPhoto{Media: u}
+		if i == 0 {
+			p.Caption = caption
+			p.ParseMode = models.ParseModeHTML
+		}
+		media[i] = p
+	}
+	msgs, err := b.bot.SendMediaGroup(ctx, &bot.SendMediaGroupParams{
+		ChatID: b.chatID,
+		Media:  media,
+	})
+	if err != nil {
+		return 0, err
+	}
+	return msgs[0].ID, nil
+}
+
 // react adds an emoji reaction to a message.
 func (b *Bot) react(ctx context.Context, chatID int64, msgID int, emoji string) {
 	b.bot.SetMessageReaction(ctx, &bot.SetMessageReactionParams{
