@@ -95,7 +95,7 @@ func (h *Handler) handleIssue(ctx context.Context, e *gh.IssuesEvent) {
 		return
 	}
 
-	if err := h.db.Save(msgID, repo, issue.GetNumber(), false); err != nil {
+	if err := h.db.Save(msgID, repo, issue.GetNumber(), false, 0); err != nil {
 		log.Printf("failed to save message mapping: %v", err)
 	}
 }
@@ -149,7 +149,7 @@ func (h *Handler) handlePullRequest(ctx context.Context, e *gh.PullRequestEvent)
 		return
 	}
 
-	if err := h.db.Save(msgID, repo, pr.GetNumber(), true); err != nil {
+	if err := h.db.Save(msgID, repo, pr.GetNumber(), true, 0); err != nil {
 		log.Printf("failed to save message mapping: %v", err)
 	}
 }
@@ -189,7 +189,7 @@ func (h *Handler) handleIssueComment(ctx context.Context, e *gh.IssueCommentEven
 		return
 	}
 
-	if err := h.db.Save(msgID, repo, issue.GetNumber(), issue.IsPullRequest()); err != nil {
+	if err := h.db.Save(msgID, repo, issue.GetNumber(), issue.IsPullRequest(), comment.GetID()); err != nil {
 		log.Printf("failed to save message mapping: %v", err)
 	}
 }

@@ -40,6 +40,10 @@ func mdToTelegramHTML(md, repo string) string {
 		return placeholder
 	})
 
+	// Protect blockquotes before escaping (> would become &gt;)
+	var blockquotes []string
+	s = groupBlockquotesWithPlaceholders(s, &blockquotes)
+
 	// Strip images (before link processing)
 	s = reImage.ReplaceAllString(s, "$1")
 
@@ -70,7 +74,6 @@ func mdToTelegramHTML(md, repo string) string {
 		}
 		return prefix + "<i>" + inner + "</i>" + suffix
 	})
-	s = reBlockquote.ReplaceAllString(s, "┃ <i>$1</i>")
 	s = reCheckbox.ReplaceAllStringFunc(s, func(match string) string {
 		parts := reCheckbox.FindStringSubmatch(match)
 		if parts[1] == " " {
@@ -99,8 +102,41 @@ func mdToTelegramHTML(md, repo string) string {
 	for i, link := range links {
 		s = strings.Replace(s, fmt.Sprintf("\x00LINK%d\x00", i), link, 1)
 	}
+	for i, bq := range blockquotes {
+		s = strings.Replace(s, fmt.Sprintf("\x00BLOCKQUOTE%d\x00", i), bq, 1)
+	}
 
 	return strings.TrimSpace(s)
+}
+
+// groupBlockquotesWithPlaceholders extracts consecutive `> ` lines, converts them to
+// <blockquote> HTML, and replaces them with placeholders to survive escapeHTML.
+func groupBlockquotesWithPlaceholders(s string, out *[]string) string {
+	lines := strings.Split(s, "\n")
+	var result []string
+	var quoteBlock []string
+
+	flush := func() {
+		if len(quoteBlock) > 0 {
+			placeholder := fmt.Sprintf("\x00BLOCKQUOTE%d\x00", len(*out))
+			*out = append(*out, "<blockquote>"+escapeHTML(strings.Join(quoteBlock, "\n"))+"</blockquote>")
+			result = append(result, placeholder)
+			quoteBlock = nil
+		}
+	}
+
+	for _, line := range lines {
+		if reBlockquote.MatchString(line) {
+			inner := reBlockquote.FindStringSubmatch(line)[1]
+			quoteBlock = append(quoteBlock, inner)
+		} else {
+			flush()
+			result = append(result, line)
+		}
+	}
+	flush()
+
+	return strings.Join(result, "\n")
 }
 
 func escapeHTML(s string) string {

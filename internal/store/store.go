@@ -23,7 +23,8 @@ func Open(path string) (*Store, error) {
 			telegram_msg_id INTEGER PRIMARY KEY,
 			repo            TEXT NOT NULL,
 			issue_number    INTEGER NOT NULL,
-			is_pr           BOOLEAN NOT NULL DEFAULT FALSE
+			is_pr           BOOLEAN NOT NULL DEFAULT FALSE,
+			comment_id      INTEGER NOT NULL DEFAULT 0
 		)
 	`); err != nil {
 		return nil, fmt.Errorf("create table: %w", err)
@@ -37,19 +38,20 @@ func (s *Store) Close() error {
 }
 
 // Save records a mapping from a Telegram message to a GitHub issue/PR.
-func (s *Store) Save(telegramMsgID int, repo string, issueNumber int, isPR bool) error {
+// commentID is 0 for issue/PR body notifications, or the GitHub comment ID for comment notifications.
+func (s *Store) Save(telegramMsgID int, repo string, issueNumber int, isPR bool, commentID int64) error {
 	_, err := s.db.Exec(
-		`INSERT OR REPLACE INTO message_map (telegram_msg_id, repo, issue_number, is_pr) VALUES (?, ?, ?, ?)`,
-		telegramMsgID, repo, issueNumber, isPR,
+		`INSERT OR REPLACE INTO message_map (telegram_msg_id, repo, issue_number, is_pr, comment_id) VALUES (?, ?, ?, ?, ?)`,
+		telegramMsgID, repo, issueNumber, isPR, commentID,
 	)
 	return err
 }
 
 // Lookup finds the GitHub issue/PR associated with a Telegram message.
-func (s *Store) Lookup(telegramMsgID int) (repo string, issueNumber int, isPR bool, err error) {
+func (s *Store) Lookup(telegramMsgID int) (repo string, issueNumber int, isPR bool, commentID int64, err error) {
 	err = s.db.QueryRow(
-		`SELECT repo, issue_number, is_pr FROM message_map WHERE telegram_msg_id = ?`,
+		`SELECT repo, issue_number, is_pr, comment_id FROM message_map WHERE telegram_msg_id = ?`,
 		telegramMsgID,
-	).Scan(&repo, &issueNumber, &isPR)
+	).Scan(&repo, &issueNumber, &isPR, &commentID)
 	return
 }
