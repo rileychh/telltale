@@ -55,6 +55,20 @@ func (b *Bot) Send(ctx context.Context, html string) (int, error) {
 	return msg.ID, nil
 }
 
+// react adds an emoji reaction to a message.
+func (b *Bot) react(ctx context.Context, chatID int64, msgID int, emoji string) {
+	b.bot.SetMessageReaction(ctx, &bot.SetMessageReactionParams{
+		ChatID:    chatID,
+		MessageID: msgID,
+		Reaction: []models.ReactionType{
+			{
+				Type:              models.ReactionTypeTypeEmoji,
+				ReactionTypeEmoji: &models.ReactionTypeEmoji{Emoji: emoji},
+			},
+		},
+	})
+}
+
 // StartWebhook starts processing incoming Telegram updates.
 func (b *Bot) StartWebhook(ctx context.Context) {
 	b.bot.StartWebhook(ctx)
@@ -107,6 +121,8 @@ func (b *Bot) RegisterReplyHandler(mux *http.ServeMux, path string, db *store.St
 			log.Printf("failed to post comment to %s#%d: %v", repo, issueNumber, err)
 			return
 		}
+
+		b.react(ctx, msg.Chat.ID, msg.ID, "👀")
 
 		// Save the user's message so replies to it resolve to the new comment
 		if err := db.Save(msg.ID, repo, issueNumber, false, newCommentID, ""); err != nil {
