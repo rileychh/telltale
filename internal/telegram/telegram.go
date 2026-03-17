@@ -69,7 +69,7 @@ func (b *Bot) RegisterReplyHandler(mux *http.ServeMux, path string, db *store.St
 			return
 		}
 
-		repo, issueNumber, _, commentID, err := db.Lookup(msg.ReplyToMessage.ID)
+		repo, issueNumber, _, commentID, quoteText, err := db.Lookup(msg.ReplyToMessage.ID)
 		if err != nil {
 			log.Printf("reply lookup failed: %v", err)
 			return
@@ -83,16 +83,23 @@ func (b *Bot) RegisterReplyHandler(mux *http.ServeMux, path string, db *store.St
 		replyText := entitiesToMarkdown(msg.Text, msg.Entities)
 
 		// Fetch the original content to quote
-		var comment string
-		_, body, err := gh.GetQuoteContext(ctx, repo, issueNumber, commentID)
-		if err != nil {
-			log.Printf("failed to fetch quote context: %v", err)
-			comment = fmt.Sprintf("*%s on Telegram:*\n%s", displayName, replyText)
+		var body string
+		if quoteText != "" {
+			body = quoteText
 		} else {
-			// Strip existing quotes and metadata to only quote the latest message
+			_, body, err = gh.GetQuoteContext(ctx, repo, issueNumber, commentID)
+			if err != nil {
+				log.Printf("failed to fetch quote context: %v", err)
+			}
+		}
+
+		var comment string
+		if body != "" {
 			body = stripQuotes(body)
 			quoted := quoteLines(body)
 			comment = fmt.Sprintf("%s\n\n*%s on Telegram:*\n%s", quoted, displayName, replyText)
+		} else {
+			comment = fmt.Sprintf("*%s on Telegram:*\n%s", displayName, replyText)
 		}
 
 		newCommentID, err := gh.CreateComment(ctx, repo, issueNumber, comment)
@@ -102,7 +109,7 @@ func (b *Bot) RegisterReplyHandler(mux *http.ServeMux, path string, db *store.St
 		}
 
 		// Save the user's message so replies to it resolve to the new comment
-		if err := db.Save(msg.ID, repo, issueNumber, false, newCommentID); err != nil {
+		if err := db.Save(msg.ID, repo, issueNumber, false, newCommentID, ""); err != nil {
 			log.Printf("failed to save reply mapping: %v", err)
 		}
 

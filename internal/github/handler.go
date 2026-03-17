@@ -59,34 +59,34 @@ func (h *Handler) handleIssue(ctx context.Context, e *gh.IssuesEvent) {
 	issue := e.GetIssue()
 	repo := e.GetRepo().GetFullName()
 
-	var emoji string
+	user := escapeHTML(e.GetSender().GetLogin())
+	var header string
 	switch action {
 	case "opened":
-		emoji = "🟢"
+		header = "🟢 <b>Issue opened by " + user + "</b>"
 	case "closed":
 		switch issue.GetStateReason() {
 		case "not_planned":
-			emoji = "⚪"
-			action = "closed as not planned"
+			header = "⚪ <b>Issue closed as not planned by " + user + "</b>"
 		default:
-			emoji = "🟣"
-			action = "closed as completed"
+			header = "🟣 <b>Issue closed as completed by " + user + "</b>"
 		}
 	case "reopened":
-		emoji = "🟢"
+		header = "🟢 <b>Issue reopened by " + user + "</b>"
 	default:
 		return
 	}
 
 	html := fmt.Sprintf(
-		`%s <b>Issue %s</b>`+"\n"+`<a href="%s">%s#%d</a>: %s`+"\n"+`by %s`,
-		emoji, action,
+		`%s`+"\n"+`<a href="%s">%s#%d</a>: %s`,
+		header,
 		issue.GetHTMLURL(), repo, issue.GetNumber(), escapeHTML(issue.GetTitle()),
-		escapeHTML(issue.GetUser().GetLogin()),
 	)
 
-	if body := issue.GetBody(); body != "" {
-		html += "\n\n" + mdToTelegramHTML(body, repo)
+	if action == "opened" {
+		if body := issue.GetBody(); body != "" {
+			html += "\n\n" + mdToTelegramHTML(body, repo)
+		}
 	}
 
 	msgID, err := h.tg.Send(ctx, html)
@@ -95,7 +95,7 @@ func (h *Handler) handleIssue(ctx context.Context, e *gh.IssuesEvent) {
 		return
 	}
 
-	if err := h.db.Save(msgID, repo, issue.GetNumber(), false, 0); err != nil {
+	if err := h.db.Save(msgID, repo, issue.GetNumber(), false, 0, ""); err != nil {
 		log.Printf("failed to save message mapping: %v", err)
 	}
 }
@@ -105,42 +105,41 @@ func (h *Handler) handlePullRequest(ctx context.Context, e *gh.PullRequestEvent)
 	pr := e.GetPullRequest()
 	repo := e.GetRepo().GetFullName()
 
-	var emoji string
+	user := escapeHTML(e.GetSender().GetLogin())
+	var header string
 	switch action {
 	case "opened":
 		if pr.GetDraft() {
-			emoji = "⚪"
-			action = "drafted"
+			header = "⚪ <b>PR drafted by " + user + "</b>"
 		} else {
-			emoji = "🟢"
+			header = "🟢 <b>PR opened by " + user + "</b>"
 		}
 	case "closed":
 		if pr.GetMerged() {
-			emoji = "🟣"
-			action = "merged"
+			header = "🟣 <b>PR merged by " + user + "</b>"
 		} else {
-			emoji = "🔴"
+			header = "🔴 <b>PR closed by " + user + "</b>"
 		}
 	case "reopened":
-		emoji = "🟢"
+		header = "🟢 <b>PR reopened by " + user + "</b>"
 	case "ready_for_review":
-		emoji = "👀"
+		header = "👀 <b>PR ready for review by " + user + "</b>"
 	case "converted_to_draft":
-		emoji = "⚪"
-		action = "converted to draft"
+		header = "⚪ <b>PR converted to draft by " + user + "</b>"
 	default:
 		return
 	}
 
 	html := fmt.Sprintf(
-		`%s <b>PR %s</b>`+"\n"+`<a href="%s">%s#%d</a>: %s`+"\n"+`by %s`,
-		emoji, action,
+		`%s`+"\n"+`<a href="%s">%s#%d</a>: %s`,
+		header,
 		pr.GetHTMLURL(), repo, pr.GetNumber(), escapeHTML(pr.GetTitle()),
-		escapeHTML(pr.GetUser().GetLogin()),
 	)
 
-	if body := pr.GetBody(); body != "" {
-		html += "\n\n" + mdToTelegramHTML(body, repo)
+	if action == "opened" {
+		if body := pr.GetBody(); body != "" {
+			html += "\n\n" + mdToTelegramHTML(body, repo)
+		}
 	}
 
 	msgID, err := h.tg.Send(ctx, html)
@@ -149,7 +148,7 @@ func (h *Handler) handlePullRequest(ctx context.Context, e *gh.PullRequestEvent)
 		return
 	}
 
-	if err := h.db.Save(msgID, repo, pr.GetNumber(), true, 0); err != nil {
+	if err := h.db.Save(msgID, repo, pr.GetNumber(), true, 0, ""); err != nil {
 		log.Printf("failed to save message mapping: %v", err)
 	}
 }
@@ -172,11 +171,11 @@ func (h *Handler) handleIssueComment(ctx context.Context, e *gh.IssueCommentEven
 		kind = "PR"
 	}
 
+	user := escapeHTML(comment.GetUser().GetLogin())
 	html := fmt.Sprintf(
-		`💬 <b>Comment on %s</b>`+"\n"+`<a href="%s">%s#%d</a>: %s`+"\n"+`%s:`,
-		kind,
+		`💬 <b>Comment on %s by %s</b>`+"\n"+`<a href="%s">%s#%d</a>: %s`,
+		kind, user,
 		comment.GetHTMLURL(), repo, issue.GetNumber(), escapeHTML(issue.GetTitle()),
-		escapeHTML(comment.GetUser().GetLogin()),
 	)
 
 	if body := comment.GetBody(); body != "" {
@@ -189,7 +188,7 @@ func (h *Handler) handleIssueComment(ctx context.Context, e *gh.IssueCommentEven
 		return
 	}
 
-	if err := h.db.Save(msgID, repo, issue.GetNumber(), issue.IsPullRequest(), comment.GetID()); err != nil {
+	if err := h.db.Save(msgID, repo, issue.GetNumber(), issue.IsPullRequest(), comment.GetID(), ""); err != nil {
 		log.Printf("failed to save message mapping: %v", err)
 	}
 }
@@ -203,26 +202,36 @@ func (h *Handler) handlePullRequestReview(ctx context.Context, e *gh.PullRequest
 	pr := e.GetPullRequest()
 	repo := e.GetRepo().GetFullName()
 
-	var emoji string
+	reviewer := escapeHTML(review.GetUser().GetLogin())
+	var header string
 	switch review.GetState() {
 	case "approved":
-		emoji = "✅"
+		header = "✅ <b>Approved by " + reviewer + "</b>"
 	case "changes_requested":
-		emoji = "🔄"
+		header = "🛑 <b>Changes Requested by " + reviewer + "</b>"
 	case "commented":
-		return // avoid duplicate with issue_comment
+		header = "👀 <b>Reviewed by " + reviewer + "</b>"
 	default:
 		return
 	}
 
 	html := fmt.Sprintf(
-		`%s <b>Review: %s</b>`+"\n"+`<a href="%s">%s#%d</a>: %s`+"\n"+`by %s`,
-		emoji, review.GetState(),
+		`%s`+"\n"+`<a href="%s">%s#%d</a>: %s`,
+		header,
 		review.GetHTMLURL(), repo, pr.GetNumber(), escapeHTML(pr.GetTitle()),
-		escapeHTML(review.GetUser().GetLogin()),
 	)
 
-	if _, err := h.tg.Send(ctx, html); err != nil {
+	if body := review.GetBody(); body != "" {
+		html += "\n\n" + mdToTelegramHTML(body, repo)
+	}
+
+	msgID, err := h.tg.Send(ctx, html)
+	if err != nil {
 		log.Printf("failed to send review notification: %v", err)
+		return
+	}
+
+	if err := h.db.Save(msgID, repo, pr.GetNumber(), true, 0, review.GetBody()); err != nil {
+		log.Printf("failed to save message mapping: %v", err)
 	}
 }

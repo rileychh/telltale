@@ -24,7 +24,8 @@ func Open(path string) (*Store, error) {
 			repo            TEXT NOT NULL,
 			issue_number    INTEGER NOT NULL,
 			is_pr           BOOLEAN NOT NULL DEFAULT FALSE,
-			comment_id      INTEGER NOT NULL DEFAULT 0
+			comment_id      INTEGER NOT NULL DEFAULT 0,
+			quote_text      TEXT NOT NULL DEFAULT ''
 		)
 	`); err != nil {
 		return nil, fmt.Errorf("create table: %w", err)
@@ -38,20 +39,21 @@ func (s *Store) Close() error {
 }
 
 // Save records a mapping from a Telegram message to a GitHub issue/PR.
-// commentID is 0 for issue/PR body notifications, or the GitHub comment ID for comment notifications.
-func (s *Store) Save(telegramMsgID int, repo string, issueNumber int, isPR bool, commentID int64) error {
+// commentID is the GitHub comment ID for comment notifications (0 otherwise).
+// quoteText overrides the quote context when set (used for reviews).
+func (s *Store) Save(telegramMsgID int, repo string, issueNumber int, isPR bool, commentID int64, quoteText string) error {
 	_, err := s.db.Exec(
-		`INSERT OR REPLACE INTO message_map (telegram_msg_id, repo, issue_number, is_pr, comment_id) VALUES (?, ?, ?, ?, ?)`,
-		telegramMsgID, repo, issueNumber, isPR, commentID,
+		`INSERT OR REPLACE INTO message_map (telegram_msg_id, repo, issue_number, is_pr, comment_id, quote_text) VALUES (?, ?, ?, ?, ?, ?)`,
+		telegramMsgID, repo, issueNumber, isPR, commentID, quoteText,
 	)
 	return err
 }
 
 // Lookup finds the GitHub issue/PR associated with a Telegram message.
-func (s *Store) Lookup(telegramMsgID int) (repo string, issueNumber int, isPR bool, commentID int64, err error) {
+func (s *Store) Lookup(telegramMsgID int) (repo string, issueNumber int, isPR bool, commentID int64, quoteText string, err error) {
 	err = s.db.QueryRow(
-		`SELECT repo, issue_number, is_pr, comment_id FROM message_map WHERE telegram_msg_id = ?`,
+		`SELECT repo, issue_number, is_pr, comment_id, quote_text FROM message_map WHERE telegram_msg_id = ?`,
 		telegramMsgID,
-	).Scan(&repo, &issueNumber, &isPR, &commentID)
+	).Scan(&repo, &issueNumber, &isPR, &commentID, &quoteText)
 	return
 }
