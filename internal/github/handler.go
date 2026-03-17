@@ -239,7 +239,7 @@ func (h *Handler) handlePullRequestReview(ctx context.Context, e *gh.PullRequest
 	)
 
 	var imageURLs []string
-	if body := review.GetBody(); body != "" {
+	if body := review.GetBody(); body != "" && review.GetUser().GetType() != "Bot" {
 		converted, imgs := mdToTelegramHTML(body, repo)
 		html += "\n\n" + converted
 		imageURLs = imgs
