@@ -1,0 +1,14 @@
+services:
+  telltale:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    volumes:
+      - data:/data
+    environment:
+      DATABASE_PATH: /data/telltale.db
+
+volumes:
+  data:
