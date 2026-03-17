@@ -1,4 +1,4 @@
-telltale
+/telltale
 telltale.db
 .env
 .claude/settings.local.json
