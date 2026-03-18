@@ -23,6 +23,7 @@ Configuration via environment variables (see `.env.example`):
 - `TELEGRAM_TOKEN`, `TELEGRAM_CHAT_ID` — Telegram bot credentials
 - `GITHUB_WEBHOOK_SECRET` — HMAC-SHA256 webhook validation secret
 - `GITHUB_APP_ID`, `GITHUB_PRIVATE_KEY_PATH` — GitHub App auth
+- `GITHUB_DEFAULT_REPO` — Default repo for autolink lookups (e.g. `owner/repo`), optional
 - `PORT` (default 8080), `DATABASE_PATH` (default telltale.db)
 
 ## Architecture
@@ -33,13 +34,20 @@ Telltale is a GitHub↔Telegram bridge bot. It receives GitHub webhooks, formats
 
 - **`cmd/telltale`** — Entry point. Loads config, initializes components, sets up HTTP routes (`POST /webhook/github`, `GET /health`, dynamic Telegram webhook), handles graceful shutdown.
 - **`internal/github`** — GitHub webhook handler and API client. Validates webhooks with HMAC-SHA256, processes issue/PR/comment/review events, converts markdown to Telegram HTML. Authenticates as a GitHub App via `ghinstallation`.
-- **`internal/telegram`** — Telegram bot. Sends HTML notifications, handles reply-to-comment flow (looks up GitHub context, posts comment, saves mapping, reacts with 👀).
+- **`internal/telegram`** — Telegram bot. Sends HTML notifications, handles reply-to-comment flow (looks up GitHub context, posts comment, saves mapping, reacts with 👀). Also handles autolink previews for `#N` and commit SHA references.
 - **`internal/store`** — SQLite store mapping Telegram message IDs → GitHub context (repo, issue number, comment ID). Enables stateful reply routing.
 
 ### Key Flow: Reply Routing
 
 1. GitHub webhook → handler formats notification → Telegram message sent → mapping saved to SQLite
 2. User replies to Telegram message → handler looks up mapping → fetches quote context from GitHub → posts comment → saves new mapping → adds reaction
+
+### Key Flow: Autolink Previews
+
+1. User sends message containing `#N` or commit SHA in Telegram
+2. Bot looks up the issue/PR/commit via GitHub API
+3. For PRs, bot finds the `<!-- pr-preview-comment -->` comment to extract build number and install links
+4. Bot sends a formatted summary (e.g. `#205 fix: title\nBuild 680 ⋅ Install on Android ⋅ iOS skipped`)
 
 ### Markdown/HTML Conversion (`internal/github/html.go`)
 

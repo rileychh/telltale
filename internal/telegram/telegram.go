@@ -22,8 +22,10 @@ type GitHubClient interface {
 
 // Bot wraps the Telegram bot for sending notifications.
 type Bot struct {
-	bot    *bot.Bot
-	chatID int64
+	bot            *bot.Bot
+	chatID         int64
+	autolinkClient AutolinkClient
+	autolinkRepo   string
 }
 
 func New(token string, chatID string) (*Bot, error) {
@@ -118,65 +120,78 @@ func (b *Bot) StartWebhook(ctx context.Context) {
 func (b *Bot) RegisterReplyHandler(mux *http.ServeMux, path string, db *store.Store, gh GitHubClient) {
 	b.bot.RegisterHandler(bot.HandlerTypeMessageText, "", bot.MatchTypePrefix, func(ctx context.Context, _ *bot.Bot, update *models.Update) {
 		msg := update.Message
-		if msg == nil || msg.ReplyToMessage == nil || msg.Text == "" {
+		if msg == nil || msg.Text == "" {
 			return
 		}
 
-		repo, issueNumber, _, commentID, quoteText, isReviewComment, err := db.Lookup(msg.ReplyToMessage.ID)
-		if err != nil {
-			log.Printf("reply lookup failed: %v", err)
+		// Handle replies to tracked notifications
+		if msg.ReplyToMessage != nil {
+			b.handleReply(ctx, msg, db, gh)
 			return
 		}
 
-		displayName := strings.TrimSpace(msg.From.FirstName + " " + msg.From.LastName)
-		if displayName == "" {
-			displayName = msg.From.Username
+		// Handle autolinks in non-reply messages
+		if b.autolinkClient != nil && b.autolinkRepo != "" {
+			b.handleAutolinks(ctx, msg)
 		}
-
-		replyText := entitiesToMarkdown(msg.Text, msg.Entities)
-
-		// Fetch the original content to quote
-		var body string
-		if quoteText != "" {
-			body = quoteText
-		} else {
-			_, body, err = gh.GetQuoteContext(ctx, repo, issueNumber, commentID, isReviewComment)
-			if err != nil {
-				log.Printf("failed to fetch quote context: %v", err)
-			}
-		}
-
-		var commentBody string
-		if body != "" {
-			body = stripQuotes(body)
-			quoted := quoteLines(body)
-			commentBody = fmt.Sprintf("%s\n\n*%s on Telegram:*\n%s", quoted, displayName, replyText)
-		} else {
-			commentBody = fmt.Sprintf("*%s on Telegram:*\n%s", displayName, replyText)
-		}
-
-		var newCommentID int64
-		if isReviewComment && commentID > 0 {
-			newCommentID, err = gh.CreateReviewReply(ctx, repo, issueNumber, commentID, commentBody)
-		} else {
-			newCommentID, err = gh.CreateComment(ctx, repo, issueNumber, commentBody)
-		}
-		if err != nil {
-			log.Printf("failed to post comment to %s#%d: %v", repo, issueNumber, err)
-			return
-		}
-
-		b.react(ctx, msg.Chat.ID, msg.ID, "👀")
-
-		// Save the user's message so replies to it resolve to the new comment
-		if err := db.Save(msg.ID, repo, issueNumber, false, newCommentID, "", isReviewComment); err != nil {
-			log.Printf("failed to save reply mapping: %v", err)
-		}
-
-		log.Printf("posted reply from %s to %s#%d", displayName, repo, issueNumber)
 	})
 
 	mux.Handle("POST "+path, b.bot.WebhookHandler())
+}
+
+func (b *Bot) handleReply(ctx context.Context, msg *models.Message, db *store.Store, gh GitHubClient) {
+	repo, issueNumber, _, commentID, quoteText, isReviewComment, err := db.Lookup(msg.ReplyToMessage.ID)
+	if err != nil {
+		log.Printf("reply lookup failed: %v", err)
+		return
+	}
+
+	displayName := strings.TrimSpace(msg.From.FirstName + " " + msg.From.LastName)
+	if displayName == "" {
+		displayName = msg.From.Username
+	}
+
+	replyText := entitiesToMarkdown(msg.Text, msg.Entities)
+
+	// Fetch the original content to quote
+	var body string
+	if quoteText != "" {
+		body = quoteText
+	} else {
+		_, body, err = gh.GetQuoteContext(ctx, repo, issueNumber, commentID, isReviewComment)
+		if err != nil {
+			log.Printf("failed to fetch quote context: %v", err)
+		}
+	}
+
+	var commentBody string
+	if body != "" {
+		body = stripQuotes(body)
+		quoted := quoteLines(body)
+		commentBody = fmt.Sprintf("%s\n\n*%s on Telegram:*\n%s", quoted, displayName, replyText)
+	} else {
+		commentBody = fmt.Sprintf("*%s on Telegram:*\n%s", displayName, replyText)
+	}
+
+	var newCommentID int64
+	if isReviewComment && commentID > 0 {
+		newCommentID, err = gh.CreateReviewReply(ctx, repo, issueNumber, commentID, commentBody)
+	} else {
+		newCommentID, err = gh.CreateComment(ctx, repo, issueNumber, commentBody)
+	}
+	if err != nil {
+		log.Printf("failed to post comment to %s#%d: %v", repo, issueNumber, err)
+		return
+	}
+
+	b.react(ctx, msg.Chat.ID, msg.ID, "👀")
+
+	// Save the user's message so replies to it resolve to the new comment
+	if err := db.Save(msg.ID, repo, issueNumber, false, newCommentID, "", isReviewComment); err != nil {
+		log.Printf("failed to save reply mapping: %v", err)
+	}
+
+	log.Printf("posted reply from %s to %s#%d", displayName, repo, issueNumber)
 }
 
 // entitiesToMarkdown converts Telegram text + entities to GitHub-flavored Markdown.

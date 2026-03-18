@@ -9,6 +9,7 @@ GitHub notifications for Telegram, done right.
 - Issue & PR lifecycle events (opened, closed, merged, reopened, draft, ready for review)
 - Markdown rendered as native Telegram formatting (bold, code, blockquotes, autolinks)
 - Reply to notifications in Telegram → comments posted to GitHub via GitHub App
+- Mention `#123` or a commit SHA in Telegram → bot sends a summary with PR preview build links
 
 ## Setup
 
@@ -25,6 +26,7 @@ TELEGRAM_CHAT_ID=         # Target group chat ID
 GITHUB_WEBHOOK_SECRET=    # Secret for validating GitHub webhooks
 GITHUB_APP_ID=            # GitHub App ID
 GITHUB_PRIVATE_KEY_PATH=  # Path to GitHub App private key (.pem)
+GITHUB_DEFAULT_REPO=      # Default repo for autolink lookups (e.g. owner/repo)
 PORT=8080                 # Server port (default: 8080)
 ```
 

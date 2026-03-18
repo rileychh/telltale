@@ -44,6 +44,10 @@ func main() {
 
 	tg.RegisterReplyHandler(mux, "/webhook/telegram", db, ghClient)
 
+	if cfg.GitHubDefaultRepo != "" {
+		tg.RegisterAutolinkHandler(ghClient, cfg.GitHubDefaultRepo)
+	}
+
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
 		Handler:      mux,
@@ -79,6 +83,7 @@ type config struct {
 	GitHubWebhookSecret string
 	GitHubAppID         int64
 	GitHubPrivateKey    []byte
+	GitHubDefaultRepo   string
 	DatabasePath        string
 	Port                string
 }
@@ -101,6 +106,7 @@ func loadConfig() config {
 		GitHubWebhookSecret: os.Getenv("GITHUB_WEBHOOK_SECRET"),
 		GitHubAppID:         appID,
 		GitHubPrivateKey:    privateKey,
+		GitHubDefaultRepo:   os.Getenv("GITHUB_DEFAULT_REPO"),
 		DatabasePath:        os.Getenv("DATABASE_PATH"),
 		Port:                os.Getenv("PORT"),
 	}
