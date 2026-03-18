@@ -14,6 +14,7 @@ var (
 	reLink       = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
 	reImage      = regexp.MustCompile(`!\[([^\]]*)\]\(([^)]+)\)`)
 	reHTMLImg    = regexp.MustCompile(`(?i)<img\s[^>]*src=["']([^"']+)["'][^>]*/?>`)
+	reHTMLImgAlt = regexp.MustCompile(`(?i)alt=["']([^"']*)["']`)
 	reHeading    = regexp.MustCompile(`(?m)^#{1,6}\s+(.+)$`)
 	reBlockquote = regexp.MustCompile(`(?m)^>\s?(.*)$`)
 	reCheckbox   = regexp.MustCompile(`(?m)^- \[([ xX])\] `)
@@ -47,18 +48,41 @@ func mdToTelegramHTML(md, repo string) (string, []string) {
 	var blockquotes []string
 	s = groupBlockquotesWithPlaceholders(s, &blockquotes)
 
-	// Extract and strip markdown images (before link processing)
+	// Process markdown images (before link processing)
+	var imagePlaceholders []string
 	s = reImage.ReplaceAllStringFunc(s, func(match string) string {
 		parts := reImage.FindStringSubmatch(match)
-		imageURLs = append(imageURLs, parts[2])
-		return ""
+		alt, url := parts[1], parts[2]
+		var html string
+		if isSupportedImage(url) {
+			imageURLs = append(imageURLs, url)
+			html = fmt.Sprintf("<i>[Image #%d]</i>", len(imageURLs))
+		} else {
+			html = unsupportedImagePlaceholder(alt)
+		}
+		placeholder := fmt.Sprintf("\x00IMG%d\x00", len(imagePlaceholders))
+		imagePlaceholders = append(imagePlaceholders, html)
+		return placeholder
 	})
 
-	// Extract and strip HTML <img> tags
+	// Process HTML <img> tags
 	s = reHTMLImg.ReplaceAllStringFunc(s, func(match string) string {
-		parts := reHTMLImg.FindStringSubmatch(match)
-		imageURLs = append(imageURLs, parts[1])
-		return ""
+		url := reHTMLImg.FindStringSubmatch(match)[1]
+		alt := reHTMLImgAlt.FindStringSubmatch(match)
+		altText := ""
+		if alt != nil {
+			altText = alt[1]
+		}
+		var html string
+		if isSupportedImage(url) {
+			imageURLs = append(imageURLs, url)
+			html = fmt.Sprintf("<i>[Image #%d]</i>", len(imageURLs))
+		} else {
+			html = unsupportedImagePlaceholder(altText)
+		}
+		placeholder := fmt.Sprintf("\x00IMG%d\x00", len(imagePlaceholders))
+		imagePlaceholders = append(imagePlaceholders, html)
+		return placeholder
 	})
 
 	// Convert links before escaping (URLs contain & etc.)
@@ -116,6 +140,9 @@ func mdToTelegramHTML(md, repo string) (string, []string) {
 	for i, link := range links {
 		s = strings.Replace(s, fmt.Sprintf("\x00LINK%d\x00", i), link, 1)
 	}
+	for i, img := range imagePlaceholders {
+		s = strings.Replace(s, fmt.Sprintf("\x00IMG%d\x00", i), img, 1)
+	}
 	for i, bq := range blockquotes {
 		s = strings.Replace(s, fmt.Sprintf("\x00BLOCKQUOTE%d\x00", i), bq, 1)
 	}
@@ -156,6 +183,35 @@ func groupBlockquotesWithPlaceholders(s string, out *[]string) string {
 	flush()
 
 	return strings.Join(result, "\n")
+}
+
+// isSupportedImage returns true if the URL points to an image Telegram can display as a photo.
+// Badge services and SVGs are not supported.
+func isSupportedImage(url string) bool {
+	lower := strings.ToLower(url)
+	if strings.HasSuffix(lower, ".svg") {
+		return false
+	}
+	unsupportedHosts := []string{
+		"img.shields.io",
+		"shields.io",
+		"badgen.net",
+		"badge.fury.io",
+		"forthebadge.com",
+	}
+	for _, host := range unsupportedHosts {
+		if strings.Contains(lower, host) {
+			return false
+		}
+	}
+	return true
+}
+
+func unsupportedImagePlaceholder(alt string) string {
+	if alt != "" {
+		return "<i>[Image: " + escapeHTML(alt) + "]</i>"
+	}
+	return "<i>[Image]</i>"
 }
 
 func escapeHTML(s string) string {
