@@ -30,7 +30,12 @@ func (h *Handler) send(ctx context.Context, html string, imageURLs []string) (in
 	if len(imageURLs) == 0 {
 		return h.tg.Send(ctx, html)
 	}
-	return h.tg.SendPhotos(ctx, imageURLs, html)
+	msgID, err := h.tg.SendPhotos(ctx, imageURLs, html)
+	if err != nil {
+		log.Printf("failed to send photos, falling back to text: %v", err)
+		return h.tg.Send(ctx, html)
+	}
+	return msgID, nil
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -105,6 +110,7 @@ func (h *Handler) handleIssue(ctx context.Context, e *gh.IssuesEvent) {
 		log.Printf("failed to send issue notification: %v", err)
 		return
 	}
+	log.Printf("sent issue notification for %s#%d (msg %d)", repo, issue.GetNumber(), msgID)
 
 	if err := h.db.Save(msgID, repo, issue.GetNumber(), false, 0, ""); err != nil {
 		log.Printf("failed to save message mapping: %v", err)
@@ -161,6 +167,7 @@ func (h *Handler) handlePullRequest(ctx context.Context, e *gh.PullRequestEvent)
 		log.Printf("failed to send PR notification: %v", err)
 		return
 	}
+	log.Printf("sent PR notification for %s#%d (msg %d)", repo, pr.GetNumber(), msgID)
 
 	if err := h.db.Save(msgID, repo, pr.GetNumber(), true, 0, ""); err != nil {
 		log.Printf("failed to save message mapping: %v", err)
@@ -204,6 +211,7 @@ func (h *Handler) handleIssueComment(ctx context.Context, e *gh.IssueCommentEven
 		log.Printf("failed to send comment notification: %v", err)
 		return
 	}
+	log.Printf("sent comment notification for %s#%d (msg %d)", repo, issue.GetNumber(), msgID)
 
 	if err := h.db.Save(msgID, repo, issue.GetNumber(), issue.IsPullRequest(), comment.GetID(), ""); err != nil {
 		log.Printf("failed to save message mapping: %v", err)
@@ -250,6 +258,7 @@ func (h *Handler) handlePullRequestReview(ctx context.Context, e *gh.PullRequest
 		log.Printf("failed to send review notification: %v", err)
 		return
 	}
+	log.Printf("sent review notification for %s#%d (msg %d)", repo, pr.GetNumber(), msgID)
 
 	if err := h.db.Save(msgID, repo, pr.GetNumber(), true, 0, review.GetBody()); err != nil {
 		log.Printf("failed to save message mapping: %v", err)
