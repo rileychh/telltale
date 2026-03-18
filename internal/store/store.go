@@ -20,16 +20,20 @@ func Open(path string) (*Store, error) {
 
 	if _, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS message_map (
-			telegram_msg_id INTEGER PRIMARY KEY,
-			repo            TEXT NOT NULL,
-			issue_number    INTEGER NOT NULL,
-			is_pr           BOOLEAN NOT NULL DEFAULT FALSE,
-			comment_id      INTEGER NOT NULL DEFAULT 0,
-			quote_text      TEXT NOT NULL DEFAULT ''
+			telegram_msg_id    INTEGER PRIMARY KEY,
+			repo               TEXT NOT NULL,
+			issue_number       INTEGER NOT NULL,
+			is_pr              BOOLEAN NOT NULL DEFAULT FALSE,
+			comment_id         INTEGER NOT NULL DEFAULT 0,
+			quote_text         TEXT NOT NULL DEFAULT '',
+			is_review_comment  BOOLEAN NOT NULL DEFAULT FALSE
 		)
 	`); err != nil {
 		return nil, fmt.Errorf("create table: %w", err)
 	}
+
+	// Migration: add is_review_comment column if missing
+	db.Exec(`ALTER TABLE message_map ADD COLUMN is_review_comment BOOLEAN NOT NULL DEFAULT FALSE`)
 
 	return &Store{db: db}, nil
 }
@@ -41,19 +45,19 @@ func (s *Store) Close() error {
 // Save records a mapping from a Telegram message to a GitHub issue/PR.
 // commentID is the GitHub comment ID for comment notifications (0 otherwise).
 // quoteText overrides the quote context when set (used for reviews).
-func (s *Store) Save(telegramMsgID int, repo string, issueNumber int, isPR bool, commentID int64, quoteText string) error {
+func (s *Store) Save(telegramMsgID int, repo string, issueNumber int, isPR bool, commentID int64, quoteText string, isReviewComment bool) error {
 	_, err := s.db.Exec(
-		`INSERT OR REPLACE INTO message_map (telegram_msg_id, repo, issue_number, is_pr, comment_id, quote_text) VALUES (?, ?, ?, ?, ?, ?)`,
-		telegramMsgID, repo, issueNumber, isPR, commentID, quoteText,
+		`INSERT OR REPLACE INTO message_map (telegram_msg_id, repo, issue_number, is_pr, comment_id, quote_text, is_review_comment) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		telegramMsgID, repo, issueNumber, isPR, commentID, quoteText, isReviewComment,
 	)
 	return err
 }
 
 // Lookup finds the GitHub issue/PR associated with a Telegram message.
-func (s *Store) Lookup(telegramMsgID int) (repo string, issueNumber int, isPR bool, commentID int64, quoteText string, err error) {
+func (s *Store) Lookup(telegramMsgID int) (repo string, issueNumber int, isPR bool, commentID int64, quoteText string, isReviewComment bool, err error) {
 	err = s.db.QueryRow(
-		`SELECT repo, issue_number, is_pr, comment_id, quote_text FROM message_map WHERE telegram_msg_id = ?`,
+		`SELECT repo, issue_number, is_pr, comment_id, quote_text, is_review_comment FROM message_map WHERE telegram_msg_id = ?`,
 		telegramMsgID,
-	).Scan(&repo, &issueNumber, &isPR, &commentID, &quoteText)
+	).Scan(&repo, &issueNumber, &isPR, &commentID, &quoteText, &isReviewComment)
 	return
 }

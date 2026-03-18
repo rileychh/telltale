@@ -62,6 +62,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleIssueComment(ctx, e)
 	case *gh.PullRequestReviewEvent:
 		h.handlePullRequestReview(ctx, e)
+	case *gh.PullRequestReviewCommentEvent:
+		h.handlePullRequestReviewComment(ctx, e)
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -112,7 +114,7 @@ func (h *Handler) handleIssue(ctx context.Context, e *gh.IssuesEvent) {
 	}
 	log.Printf("sent issue notification for %s#%d (msg %d)", repo, issue.GetNumber(), msgID)
 
-	if err := h.db.Save(msgID, repo, issue.GetNumber(), false, 0, ""); err != nil {
+	if err := h.db.Save(msgID, repo, issue.GetNumber(), false, 0, "", false); err != nil {
 		log.Printf("failed to save message mapping: %v", err)
 	}
 }
@@ -169,7 +171,7 @@ func (h *Handler) handlePullRequest(ctx context.Context, e *gh.PullRequestEvent)
 	}
 	log.Printf("sent PR notification for %s#%d (msg %d)", repo, pr.GetNumber(), msgID)
 
-	if err := h.db.Save(msgID, repo, pr.GetNumber(), true, 0, ""); err != nil {
+	if err := h.db.Save(msgID, repo, pr.GetNumber(), true, 0, "", false); err != nil {
 		log.Printf("failed to save message mapping: %v", err)
 	}
 }
@@ -213,7 +215,7 @@ func (h *Handler) handleIssueComment(ctx context.Context, e *gh.IssueCommentEven
 	}
 	log.Printf("sent comment notification for %s#%d (msg %d)", repo, issue.GetNumber(), msgID)
 
-	if err := h.db.Save(msgID, repo, issue.GetNumber(), issue.IsPullRequest(), comment.GetID(), ""); err != nil {
+	if err := h.db.Save(msgID, repo, issue.GetNumber(), issue.IsPullRequest(), comment.GetID(), "", false); err != nil {
 		log.Printf("failed to save message mapping: %v", err)
 	}
 }
@@ -235,6 +237,9 @@ func (h *Handler) handlePullRequestReview(ctx context.Context, e *gh.PullRequest
 	case "changes_requested":
 		header = "🛑 <b>Changes Requested by " + reviewer + "</b>"
 	case "commented":
+		if review.GetBody() == "" {
+			return
+		}
 		header = "👀 <b>Reviewed by " + reviewer + "</b>"
 	default:
 		return
@@ -260,7 +265,71 @@ func (h *Handler) handlePullRequestReview(ctx context.Context, e *gh.PullRequest
 	}
 	log.Printf("sent review notification for %s#%d (msg %d)", repo, pr.GetNumber(), msgID)
 
-	if err := h.db.Save(msgID, repo, pr.GetNumber(), true, 0, review.GetBody()); err != nil {
+	if err := h.db.Save(msgID, repo, pr.GetNumber(), true, 0, review.GetBody(), false); err != nil {
+		log.Printf("failed to save message mapping: %v", err)
+	}
+}
+
+func (h *Handler) handlePullRequestReviewComment(ctx context.Context, e *gh.PullRequestReviewCommentEvent) {
+	if e.GetAction() != "created" {
+		return
+	}
+
+	comment := e.GetComment()
+	if comment.GetUser().GetType() == "Bot" {
+		return
+	}
+
+	pr := e.GetPullRequest()
+	repo := e.GetRepo().GetFullName()
+
+	user := escapeHTML(comment.GetUser().GetLogin())
+	var header string
+	if comment.GetInReplyTo() > 0 {
+		header = "💬 <b>Reply by " + user + "</b>"
+	} else {
+		header = "💬 <b>Review comment by " + user + "</b>"
+	}
+	var location string
+	sidePrefix := func(side string) string {
+		if side == "LEFT" {
+			return "L"
+		}
+		return "R"
+	}
+	switch {
+	case comment.GetSubjectType() == "file" || comment.GetLine() == 0:
+		location = comment.GetPath()
+	case comment.GetStartLine() > 0 && comment.GetStartLine() != comment.GetLine():
+		location = fmt.Sprintf("%s:%s%d-%s%d", comment.GetPath(),
+			sidePrefix(comment.GetStartSide()), comment.GetStartLine(),
+			sidePrefix(comment.GetSide()), comment.GetLine())
+	default:
+		location = fmt.Sprintf("%s:%s%d", comment.GetPath(),
+			sidePrefix(comment.GetSide()), comment.GetLine())
+	}
+	html := fmt.Sprintf(
+		`%s`+"\n"+`<a href="%s">%s#%d</a>: %s`+"\n"+`On <code>%s</code>:`,
+		header,
+		comment.GetHTMLURL(), repo, pr.GetNumber(), escapeHTML(pr.GetTitle()),
+		escapeHTML(location),
+	)
+
+	var imageURLs []string
+	if body := comment.GetBody(); body != "" {
+		converted, imgs := mdToTelegramHTML(body, repo)
+		html += "\n\n" + converted
+		imageURLs = imgs
+	}
+
+	msgID, err := h.send(ctx, html, imageURLs)
+	if err != nil {
+		log.Printf("failed to send review comment notification: %v", err)
+		return
+	}
+	log.Printf("sent review comment notification for %s#%d (msg %d)", repo, pr.GetNumber(), msgID)
+
+	if err := h.db.Save(msgID, repo, pr.GetNumber(), true, comment.GetID(), "", true); err != nil {
 		log.Printf("failed to save message mapping: %v", err)
 	}
 }

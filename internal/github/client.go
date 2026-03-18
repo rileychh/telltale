@@ -52,7 +52,7 @@ func (c *Client) clientForRepo(ctx context.Context, repo string) (*gh.Client, er
 
 // GetQuoteContext fetches the text to quote in a reply.
 // If commentID > 0, fetches that specific comment; otherwise fetches the issue/PR body.
-func (c *Client) GetQuoteContext(ctx context.Context, repo string, number int, commentID int64) (author, body string, err error) {
+func (c *Client) GetQuoteContext(ctx context.Context, repo string, number int, commentID int64, isReviewComment bool) (author, body string, err error) {
 	client, err := c.clientForRepo(ctx, repo)
 	if err != nil {
 		return "", "", err
@@ -61,6 +61,13 @@ func (c *Client) GetQuoteContext(ctx context.Context, repo string, number int, c
 	parts := strings.SplitN(repo, "/", 2)
 
 	if commentID > 0 {
+		if isReviewComment {
+			comment, _, err := client.PullRequests.GetComment(ctx, parts[0], parts[1], commentID)
+			if err != nil {
+				return "", "", fmt.Errorf("get review comment: %w", err)
+			}
+			return comment.GetUser().GetLogin(), comment.GetBody(), nil
+		}
 		comment, _, err := client.Issues.GetComment(ctx, parts[0], parts[1], commentID)
 		if err != nil {
 			return "", "", fmt.Errorf("get comment: %w", err)
@@ -90,4 +97,19 @@ func (c *Client) CreateComment(ctx context.Context, repo string, number int, bod
 		return 0, err
 	}
 	return comment.GetID(), nil
+}
+
+// CreateReviewReply posts a reply to an inline review comment and returns the new comment's ID.
+func (c *Client) CreateReviewReply(ctx context.Context, repo string, number int, commentID int64, body string) (int64, error) {
+	client, err := c.clientForRepo(ctx, repo)
+	if err != nil {
+		return 0, err
+	}
+
+	parts := strings.SplitN(repo, "/", 2)
+	reply, _, err := client.PullRequests.CreateCommentInReplyTo(ctx, parts[0], parts[1], number, body, commentID)
+	if err != nil {
+		return 0, err
+	}
+	return reply.GetID(), nil
 }
