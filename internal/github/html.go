@@ -45,10 +45,6 @@ func mdToTelegramHTML(md, repo string) (string, []string) {
 		return placeholder
 	})
 
-	// Protect blockquotes before escaping (> would become &gt;)
-	var blockquotes []string
-	s = groupBlockquotesWithPlaceholders(s, &blockquotes)
-
 	// Process markdown images (before link processing)
 	var imagePlaceholders []string
 	s = reImage.ReplaceAllStringFunc(s, func(match string) string {
@@ -94,6 +90,10 @@ func mdToTelegramHTML(md, repo string) (string, []string) {
 		links = append(links, fmt.Sprintf(`<a href="%s">%s</a>`, parts[2], escapeHTML(parts[1])))
 		return placeholder
 	})
+
+	// Protect blockquotes (after links/images so they contain those placeholders)
+	var blockquotes []string
+	s = groupBlockquotesWithPlaceholders(s, &blockquotes)
 
 	// Escape HTML in remaining text
 	s = escapeHTML(s)
