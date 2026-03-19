@@ -259,10 +259,9 @@ func (h *Handler) flushReview(reviewID int64) {
 		return
 	}
 
-	// Standalone single comment (not part of a formal review submission)
+	// Standalone single comment or reply (not part of a formal review submission)
 	if p.review != nil && p.review.GetReview().GetState() == "commented" &&
-		p.review.GetReview().GetBody() == "" && len(p.comments) == 1 &&
-		p.comments[0].GetComment().GetInReplyTo() == 0 {
+		p.review.GetReview().GetBody() == "" && len(p.comments) == 1 {
 		h.sendSingleReviewComment(p.comments[0])
 		return
 	}
