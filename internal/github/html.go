@@ -17,7 +17,7 @@ var (
 	reHTMLImgAlt = regexp.MustCompile(`(?i)alt=["']([^"']*)["']`)
 	reHeading    = regexp.MustCompile(`(?m)^#{1,6}\s+(.+)$`)
 	reBlockquote = regexp.MustCompile(`(?m)^>\s?(.*)$`)
-	reCheckbox   = regexp.MustCompile(`(?m)^- \[([ xX])\] `)
+	reCheckbox   = regexp.MustCompile(`(?m)^- \[([ xX*])\] `)
 	reIssueRef   = regexp.MustCompile(`(?:^|[^&\w])#(\d+)\b`)
 	reCommitSHA  = regexp.MustCompile(`\b([0-9a-f]{7,40})\b`)
 )
