@@ -63,7 +63,7 @@ func (b *Bot) Send(ctx context.Context, html string) (int, error) {
 // Returns the message ID of the first photo.
 func (b *Bot) SendPhotos(ctx context.Context, urls []string, caption string) (int, error) {
 	if len([]rune(caption)) > 1024 {
-		caption = string([]rune(caption)[:1021]) + "..."
+		caption = truncateHTML(caption, 1024)
 	}
 	if len(urls) == 1 {
 		msg, err := b.bot.SendPhoto(ctx, &bot.SendPhotoParams{
@@ -288,4 +288,59 @@ func quoteLines(s string) string {
 		lines[i] = "> " + line
 	}
 	return strings.Join(lines, "\n")
+}
+
+// truncateHTML truncates an HTML string to maxRunes runes, ensuring no HTML
+// tags are left unclosed. It finds the last safe cut point before maxRunes
+// and closes any open tags.
+func truncateHTML(s string, maxRunes int) string {
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+
+	// Leave room for "..." and closing tags
+	cut := maxRunes - 20
+	if cut < 0 {
+		cut = 0
+	}
+	truncated := string(runes[:cut])
+
+	// Track open tags
+	var openTags []string
+	i := 0
+	for i < len(truncated) {
+		if truncated[i] == '<' {
+			end := strings.IndexByte(truncated[i:], '>')
+			if end == -1 {
+				// Incomplete tag at the end — remove it
+				truncated = truncated[:i]
+				break
+			}
+			tag := truncated[i+1 : i+end]
+			if strings.HasPrefix(tag, "/") {
+				// Closing tag — pop from stack
+				if len(openTags) > 0 {
+					openTags = openTags[:len(openTags)-1]
+				}
+			} else {
+				// Opening tag — extract tag name and push
+				name := tag
+				if sp := strings.IndexAny(name, " \t\n"); sp != -1 {
+					name = name[:sp]
+				}
+				openTags = append(openTags, name)
+			}
+			i += end + 1
+		} else {
+			i++
+		}
+	}
+
+	// Close open tags in reverse order
+	result := truncated + "..."
+	for j := len(openTags) - 1; j >= 0; j-- {
+		result += "</" + openTags[j] + ">"
+	}
+	return result
 }

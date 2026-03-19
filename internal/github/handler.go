@@ -5,24 +5,33 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
+	"strconv"
 
 	gh "github.com/google/go-github/v69/github"
 	"github.com/rileychh/telltale/internal/store"
 	"github.com/rileychh/telltale/internal/telegram"
 )
 
+var reImagePlaceholder = regexp.MustCompile(`\[Image #\d+\]`)
+
 type Handler struct {
-	secret []byte
-	tg     *telegram.Bot
-	db     *store.Store
+	secret  []byte
+	tg      *telegram.Bot
+	db      *store.Store
+	reviews *reviewBuffer
 }
 
 func NewHandler(secret string, tg *telegram.Bot, db *store.Store) *Handler {
-	return &Handler{
+	h := &Handler{
 		secret: []byte(secret),
 		tg:     tg,
 		db:     db,
 	}
+	h.reviews = newReviewBuffer(func(reviewID int64) {
+		h.flushReview(reviewID)
+	})
+	return h
 }
 
 // send sends an HTML message, using a photo or media group when images are present.
@@ -220,14 +229,60 @@ func (h *Handler) handleIssueComment(ctx context.Context, e *gh.IssueCommentEven
 	}
 }
 
-func (h *Handler) handlePullRequestReview(ctx context.Context, e *gh.PullRequestReviewEvent) {
+func (h *Handler) handlePullRequestReview(_ context.Context, e *gh.PullRequestReviewEvent) {
 	if e.GetAction() != "submitted" {
 		return
 	}
-
 	review := e.GetReview()
-	pr := e.GetPullRequest()
-	repo := e.GetRepo().GetFullName()
+	switch review.GetState() {
+	case "approved", "changes_requested", "commented":
+	default:
+		return
+	}
+	h.reviews.addReview(e)
+}
+
+func (h *Handler) handlePullRequestReviewComment(_ context.Context, e *gh.PullRequestReviewCommentEvent) {
+	if e.GetAction() != "created" {
+		return
+	}
+	if e.GetComment().GetUser().GetType() == "Bot" {
+		return
+	}
+	h.reviews.addComment(e)
+}
+
+// flushReview consolidates buffered review events into Telegram messages.
+func (h *Handler) flushReview(reviewID int64) {
+	p := h.reviews.take(reviewID)
+	if p == nil {
+		return
+	}
+
+	// Standalone single comment (not part of a formal review submission)
+	if p.review != nil && p.review.GetReview().GetState() == "commented" &&
+		p.review.GetReview().GetBody() == "" && len(p.comments) == 1 &&
+		p.comments[0].GetComment().GetInReplyTo() == 0 {
+		h.sendSingleReviewComment(p.comments[0])
+		return
+	}
+
+	// No review event arrived (timeout without it) — send comments individually
+	if p.review == nil {
+		for _, ce := range p.comments {
+			h.sendSingleReviewComment(ce)
+		}
+		return
+	}
+
+	h.sendConsolidatedReview(p)
+}
+
+func (h *Handler) sendConsolidatedReview(p *pendingReview) {
+	ctx := context.Background()
+	review := p.review.GetReview()
+	pr := p.review.GetPullRequest()
+	repo := p.review.GetRepo().GetFullName()
 
 	reviewer := escapeHTML(review.GetUser().GetLogin())
 	var header string
@@ -237,12 +292,7 @@ func (h *Handler) handlePullRequestReview(ctx context.Context, e *gh.PullRequest
 	case "changes_requested":
 		header = "🛑 <b>Changes Requested by " + reviewer + "</b>"
 	case "commented":
-		if review.GetBody() == "" {
-			return
-		}
 		header = "👀 <b>Reviewed by " + reviewer + "</b>"
-	default:
-		return
 	}
 
 	html := fmt.Sprintf(
@@ -258,28 +308,52 @@ func (h *Handler) handlePullRequestReview(ctx context.Context, e *gh.PullRequest
 		imageURLs = imgs
 	}
 
+	if len(p.comments) > 0 {
+		html += fmt.Sprintf("\n\n── %d inline comments ──", len(p.comments))
+		const maxLen = 4000
+		shown := 0
+		for _, ce := range p.comments {
+			comment := ce.GetComment()
+			location := formatCommentLocation(comment)
+			entry := fmt.Sprintf("\n\n📝 <code>%s</code>", escapeHTML(location))
+			if body := comment.GetBody(); body != "" {
+				converted, imgs := mdToTelegramHTML(body, repo)
+				entry += "\n" + converted
+				imageURLs = append(imageURLs, imgs...)
+			}
+			if len([]rune(html))+len([]rune(entry)) > maxLen {
+				remaining := len(p.comments) - shown
+				html += fmt.Sprintf("\n\n… and <a href=\"%s\">%d more</a>",
+					review.GetHTMLURL(), remaining)
+				break
+			}
+			html += entry
+			shown++
+		}
+	}
+
+	// Renumber image placeholders sequentially across all sections
+	imgNum := 0
+	html = reImagePlaceholder.ReplaceAllStringFunc(html, func(_ string) string {
+		imgNum++
+		return "[Image #" + strconv.Itoa(imgNum) + "]"
+	})
+
 	msgID, err := h.send(ctx, html, imageURLs)
 	if err != nil {
-		log.Printf("failed to send review notification: %v", err)
+		log.Printf("failed to send consolidated review for %s#%d: %v", repo, pr.GetNumber(), err)
 		return
 	}
-	log.Printf("sent review notification for %s#%d (msg %d)", repo, pr.GetNumber(), msgID)
+	log.Printf("sent consolidated review for %s#%d (%d comments, msg %d)", repo, pr.GetNumber(), len(p.comments), msgID)
 
 	if err := h.db.Save(msgID, repo, pr.GetNumber(), true, 0, review.GetBody(), false); err != nil {
 		log.Printf("failed to save message mapping: %v", err)
 	}
 }
 
-func (h *Handler) handlePullRequestReviewComment(ctx context.Context, e *gh.PullRequestReviewCommentEvent) {
-	if e.GetAction() != "created" {
-		return
-	}
-
+func (h *Handler) sendSingleReviewComment(e *gh.PullRequestReviewCommentEvent) {
+	ctx := context.Background()
 	comment := e.GetComment()
-	if comment.GetUser().GetType() == "Bot" {
-		return
-	}
-
 	pr := e.GetPullRequest()
 	repo := e.GetRepo().GetFullName()
 
@@ -290,24 +364,8 @@ func (h *Handler) handlePullRequestReviewComment(ctx context.Context, e *gh.Pull
 	} else {
 		header = "💬 <b>Review comment by " + user + "</b>"
 	}
-	var location string
-	sidePrefix := func(side string) string {
-		if side == "LEFT" {
-			return "L"
-		}
-		return "R"
-	}
-	switch {
-	case comment.GetSubjectType() == "file" || comment.GetLine() == 0:
-		location = comment.GetPath()
-	case comment.GetStartLine() > 0 && comment.GetStartLine() != comment.GetLine():
-		location = fmt.Sprintf("%s:%s%d-%s%d", comment.GetPath(),
-			sidePrefix(comment.GetStartSide()), comment.GetStartLine(),
-			sidePrefix(comment.GetSide()), comment.GetLine())
-	default:
-		location = fmt.Sprintf("%s:%s%d", comment.GetPath(),
-			sidePrefix(comment.GetSide()), comment.GetLine())
-	}
+
+	location := formatCommentLocation(comment)
 	html := fmt.Sprintf(
 		`%s`+"\n"+`<a href="%s">%s#%d</a>: %s`+"\n"+`On <code>%s</code>:`,
 		header,
@@ -331,5 +389,25 @@ func (h *Handler) handlePullRequestReviewComment(ctx context.Context, e *gh.Pull
 
 	if err := h.db.Save(msgID, repo, pr.GetNumber(), true, comment.GetID(), "", true); err != nil {
 		log.Printf("failed to save message mapping: %v", err)
+	}
+}
+
+func formatCommentLocation(comment *gh.PullRequestComment) string {
+	sidePrefix := func(side string) string {
+		if side == "LEFT" {
+			return "L"
+		}
+		return "R"
+	}
+	switch {
+	case comment.GetSubjectType() == "file" || comment.GetLine() == 0:
+		return comment.GetPath()
+	case comment.GetStartLine() > 0 && comment.GetStartLine() != comment.GetLine():
+		return fmt.Sprintf("%s:%s%d-%s%d", comment.GetPath(),
+			sidePrefix(comment.GetStartSide()), comment.GetStartLine(),
+			sidePrefix(comment.GetSide()), comment.GetLine())
+	default:
+		return fmt.Sprintf("%s:%s%d", comment.GetPath(),
+			sidePrefix(comment.GetSide()), comment.GetLine())
 	}
 }
