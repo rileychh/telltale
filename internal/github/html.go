@@ -7,19 +7,20 @@ import (
 )
 
 var (
-	reCodeBlock  = regexp.MustCompile("(?s)```[a-zA-Z]*\n?(.*?)```")
-	reInline     = regexp.MustCompile("`([^`]+)`")
-	reBold       = regexp.MustCompile(`\*\*(.+?)\*\*`)
-	reItalic     = regexp.MustCompile(`(?:^|[^*])\*([^*]+?)\*(?:[^*]|$)`)
-	reLink       = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
-	reImage      = regexp.MustCompile(`!\[([^\]]*)\]\(([^)]+)\)`)
-	reHTMLImg    = regexp.MustCompile(`(?i)<img\s[^>]*src=["']([^"']+)["'][^>]*/?>`)
-	reHTMLImgAlt = regexp.MustCompile(`(?i)alt=["']([^"']*)["']`)
-	reHeading    = regexp.MustCompile(`(?m)^#{1,6}\s+(.+)$`)
-	reBlockquote = regexp.MustCompile(`(?m)^>\s?(.*)$`)
-	reCheckbox   = regexp.MustCompile(`(?m)^- \[([ xX*])\] `)
-	reIssueRef   = regexp.MustCompile(`(?:^|[^&\w])#(\d+)\b`)
-	reCommitSHA  = regexp.MustCompile(`\b([0-9a-f]{7,40})\b`)
+	reCodeBlock    = regexp.MustCompile("(?s)```[a-zA-Z]*\n?(.*?)```")
+	reInline       = regexp.MustCompile("`([^`]+)`")
+	reBold         = regexp.MustCompile(`\*\*(.+?)\*\*`)
+	reItalic       = regexp.MustCompile(`(?:^|[^*])\*([^*]+?)\*(?:[^*]|$)`)
+	reLink         = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
+	reImage        = regexp.MustCompile(`!\[([^\]]*)\]\(([^)]+)\)`)
+	reHTMLImg      = regexp.MustCompile(`(?i)<img\s[^>]*src=["']([^"']+)["'][^>]*/?>`)
+	reHTMLImgAlt   = regexp.MustCompile(`(?i)alt=["']([^"']*)["']`)
+	reHeading      = regexp.MustCompile(`(?m)^#{1,6}\s+(.+)$`)
+	reBlockquote   = regexp.MustCompile(`(?m)^>\s?(.*)$`)
+	reCheckbox     = regexp.MustCompile(`(?m)^- \[([ xX*])\] `)
+	reIssueRef     = regexp.MustCompile(`(?:^|[^&\w])#(\d+)\b`)
+	reCommitSHA    = regexp.MustCompile(`\b([0-9a-f]{7,40})\b`)
+	reCodeInLink   = regexp.MustCompile(`(<a [^>]*>)<code>([^<]*)</code>(</a>)`)
 )
 
 // mdToTelegramHTML converts GitHub-flavored Markdown to Telegram-compatible HTML.
@@ -130,12 +131,10 @@ func mdToTelegramHTML(md, repo string) (string, []string) {
 		return fmt.Sprintf(`<a href="https://github.com/%s/commit/%s">%s</a>`, repo, match, match[:7])
 	})
 
-	// Restore placeholders
-	for i, block := range codeBlocks {
-		s = strings.Replace(s, fmt.Sprintf("\x00CODEBLOCK%d\x00", i), block, 1)
-	}
-	for i, code := range inlineCodes {
-		s = strings.Replace(s, fmt.Sprintf("\x00INLINE%d\x00", i), code, 1)
+	// Restore placeholders from outermost to innermost:
+	// blockquotes may contain links/inline/images, links may contain inline code
+	for i, bq := range blockquotes {
+		s = strings.Replace(s, fmt.Sprintf("\x00BLOCKQUOTE%d\x00", i), bq, 1)
 	}
 	for i, link := range links {
 		s = strings.Replace(s, fmt.Sprintf("\x00LINK%d\x00", i), link, 1)
@@ -143,9 +142,15 @@ func mdToTelegramHTML(md, repo string) (string, []string) {
 	for i, img := range imagePlaceholders {
 		s = strings.Replace(s, fmt.Sprintf("\x00IMG%d\x00", i), img, 1)
 	}
-	for i, bq := range blockquotes {
-		s = strings.Replace(s, fmt.Sprintf("\x00BLOCKQUOTE%d\x00", i), bq, 1)
+	for i, block := range codeBlocks {
+		s = strings.Replace(s, fmt.Sprintf("\x00CODEBLOCK%d\x00", i), block, 1)
 	}
+	for i, code := range inlineCodes {
+		s = strings.Replace(s, fmt.Sprintf("\x00INLINE%d\x00", i), code, 1)
+	}
+
+	// Telegram doesn't support <code> inside <a>, strip inner code tags
+	s = reCodeInLink.ReplaceAllString(s, "${1}${2}${3}")
 
 	// Collapse runs of 3+ newlines into 2 (single blank line)
 	for strings.Contains(s, "\n\n\n") {
