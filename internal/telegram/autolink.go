@@ -36,6 +36,9 @@ func (b *Bot) handleAutolinks(ctx context.Context, msg *models.Message) {
 	}
 
 	text := msg.Text
+	if text == "" {
+		text = msg.Caption
+	}
 	var parts []string
 
 	if matches := autolinkIssueRe.FindAllStringSubmatch(text, -1); matches != nil {

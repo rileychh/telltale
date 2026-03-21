@@ -166,6 +166,15 @@ func (b *Bot) RegisterReplyHandler(mux *http.ServeMux, path string, db *store.St
 		}
 	})
 
+	// Handle autolinks in media captions (photos, videos, documents, etc.)
+	b.bot.RegisterHandlerMatchFunc(func(update *models.Update) bool {
+		return update.Message != nil && update.Message.Caption != ""
+	}, func(ctx context.Context, _ *bot.Bot, update *models.Update) {
+		if b.autolinkClient != nil && b.autolinkRepo != "" {
+			b.handleAutolinks(ctx, update.Message)
+		}
+	})
+
 	mux.Handle("POST "+path, b.bot.WebhookHandler())
 }
 
