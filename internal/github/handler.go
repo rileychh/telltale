@@ -7,13 +7,15 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 
 	gh "github.com/google/go-github/v69/github"
 	"github.com/rileychh/telltale/internal/store"
+	"github.com/rileychh/telltale/internal/tableimg"
 	"github.com/rileychh/telltale/internal/telegram"
 )
 
-var reImagePlaceholder = regexp.MustCompile(`\[Image #\d+\]`)
+var reMediaPlaceholder = regexp.MustCompile(`\[(Image|Table) #\d+\]`)
 
 type Handler struct {
 	secret  []byte
@@ -34,17 +36,41 @@ func NewHandler(secret string, tg *telegram.Bot, db *store.Store) *Handler {
 	return h
 }
 
-// send sends an HTML message, using a photo or media group when images are present.
-func (h *Handler) send(ctx context.Context, html string, imageURLs []string) (int, error) {
-	if len(imageURLs) == 0 {
+// send sends an HTML message, using a photo or media group when media is present.
+func (h *Handler) send(ctx context.Context, html string, refs []MediaRef) (int, error) {
+	media := resolveMedia(refs)
+	if len(media) == 0 {
 		return h.tg.Send(ctx, html)
 	}
-	msgID, err := h.tg.SendPhotos(ctx, imageURLs, html)
+	msgID, err := h.tg.SendMedia(ctx, media, html)
 	if err != nil {
-		log.Printf("failed to send photos, falling back to text: %v", err)
+		log.Printf("failed to send media, falling back to text: %v", err)
 		return h.tg.Send(ctx, html)
 	}
 	return msgID, nil
+}
+
+// resolveMedia converts MediaRefs to telegram MediaItems, rendering tables to PNG.
+func resolveMedia(refs []MediaRef) []telegram.MediaItem {
+	var items []telegram.MediaItem
+	tableNum := 0
+	for _, ref := range refs {
+		if ref.URL != "" {
+			items = append(items, telegram.MediaItem{URL: ref.URL})
+		} else if ref.Table != nil {
+			tableNum++
+			data, err := tableimg.Render(*ref.Table)
+			if err != nil {
+				log.Printf("failed to render table: %v", err)
+				continue
+			}
+			items = append(items, telegram.MediaItem{
+				Data: data,
+				Name: fmt.Sprintf("table_%d.png", tableNum),
+			})
+		}
+	}
+	return items
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -107,16 +133,16 @@ func (h *Handler) handleIssue(ctx context.Context, e *gh.IssuesEvent) {
 		issue.GetHTMLURL(), repo, issue.GetNumber(), escapeHTML(issue.GetTitle()),
 	)
 
-	var imageURLs []string
+	var media []MediaRef
 	if action == "opened" {
 		if body := issue.GetBody(); body != "" {
-			converted, imgs := mdToTelegramHTML(body, repo)
+			converted, refs := mdToTelegramHTML(body, repo)
 			html += "\n\n" + converted
-			imageURLs = imgs
+			media = refs
 		}
 	}
 
-	msgID, err := h.send(ctx, html, imageURLs)
+	msgID, err := h.send(ctx, html, media)
 	if err != nil {
 		log.Printf("failed to send issue notification: %v", err)
 		return
@@ -164,16 +190,16 @@ func (h *Handler) handlePullRequest(ctx context.Context, e *gh.PullRequestEvent)
 		pr.GetHTMLURL(), repo, pr.GetNumber(), escapeHTML(pr.GetTitle()),
 	)
 
-	var imageURLs []string
+	var media []MediaRef
 	if action == "opened" {
 		if body := pr.GetBody(); body != "" {
-			converted, imgs := mdToTelegramHTML(body, repo)
+			converted, refs := mdToTelegramHTML(body, repo)
 			html += "\n\n" + converted
-			imageURLs = imgs
+			media = refs
 		}
 	}
 
-	msgID, err := h.send(ctx, html, imageURLs)
+	msgID, err := h.send(ctx, html, media)
 	if err != nil {
 		log.Printf("failed to send PR notification: %v", err)
 		return
@@ -210,14 +236,14 @@ func (h *Handler) handleIssueComment(ctx context.Context, e *gh.IssueCommentEven
 		comment.GetHTMLURL(), repo, issue.GetNumber(), escapeHTML(issue.GetTitle()),
 	)
 
-	var imageURLs []string
+	var media []MediaRef
 	if body := comment.GetBody(); body != "" {
-		converted, imgs := mdToTelegramHTML(body, repo)
+		converted, refs := mdToTelegramHTML(body, repo)
 		html += "\n\n" + converted
-		imageURLs = imgs
+		media = refs
 	}
 
-	msgID, err := h.send(ctx, html, imageURLs)
+	msgID, err := h.send(ctx, html, media)
 	if err != nil {
 		log.Printf("failed to send comment notification: %v", err)
 		return
@@ -300,11 +326,11 @@ func (h *Handler) sendConsolidatedReview(p *pendingReview) {
 		review.GetHTMLURL(), repo, pr.GetNumber(), escapeHTML(pr.GetTitle()),
 	)
 
-	var imageURLs []string
+	var media []MediaRef
 	if body := review.GetBody(); body != "" && review.GetUser().GetType() != "Bot" {
-		converted, imgs := mdToTelegramHTML(body, repo)
+		converted, refs := mdToTelegramHTML(body, repo)
 		html += "\n\n" + converted
-		imageURLs = imgs
+		media = refs
 	}
 
 	if len(p.comments) > 0 {
@@ -316,9 +342,9 @@ func (h *Handler) sendConsolidatedReview(p *pendingReview) {
 			location := formatCommentLocation(comment)
 			entry := fmt.Sprintf("\n\n📝 <code>%s</code>", escapeHTML(location))
 			if body := comment.GetBody(); body != "" {
-				converted, imgs := mdToTelegramHTML(body, repo)
+				converted, refs := mdToTelegramHTML(body, repo)
 				entry += "\n" + converted
-				imageURLs = append(imageURLs, imgs...)
+				media = append(media, refs...)
 			}
 			if len([]rune(html))+len([]rune(entry)) > maxLen {
 				remaining := len(p.comments) - shown
@@ -331,14 +357,18 @@ func (h *Handler) sendConsolidatedReview(p *pendingReview) {
 		}
 	}
 
-	// Renumber image placeholders sequentially across all sections
+	// Renumber media placeholders sequentially across all sections
 	imgNum := 0
-	html = reImagePlaceholder.ReplaceAllStringFunc(html, func(_ string) string {
+	html = reMediaPlaceholder.ReplaceAllStringFunc(html, func(match string) string {
 		imgNum++
-		return "[Image #" + strconv.Itoa(imgNum) + "]"
+		kind := "Image"
+		if strings.Contains(match, "Table") {
+			kind = "Table"
+		}
+		return "[" + kind + " #" + strconv.Itoa(imgNum) + "]"
 	})
 
-	msgID, err := h.send(ctx, html, imageURLs)
+	msgID, err := h.send(ctx, html, media)
 	if err != nil {
 		log.Printf("failed to send consolidated review for %s#%d: %v", repo, pr.GetNumber(), err)
 		return
@@ -372,14 +402,14 @@ func (h *Handler) sendSingleReviewComment(e *gh.PullRequestReviewCommentEvent) {
 		escapeHTML(location),
 	)
 
-	var imageURLs []string
+	var media []MediaRef
 	if body := comment.GetBody(); body != "" {
-		converted, imgs := mdToTelegramHTML(body, repo)
+		converted, refs := mdToTelegramHTML(body, repo)
 		html += "\n\n" + converted
-		imageURLs = imgs
+		media = refs
 	}
 
-	msgID, err := h.send(ctx, html, imageURLs)
+	msgID, err := h.send(ctx, html, media)
 	if err != nil {
 		log.Printf("failed to send review comment notification: %v", err)
 		return

@@ -9,6 +9,11 @@ require (
 )
 
 require (
+	golang.org/x/image v0.37.0
+	golang.org/x/text v0.35.0 // indirect
+)
+
+require (
 	github.com/bradleyfalzon/ghinstallation/v2 v2.18.0
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/golang-jwt/jwt/v4 v4.5.2 // indirect

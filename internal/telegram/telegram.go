@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
@@ -58,17 +59,40 @@ func (b *Bot) Send(ctx context.Context, html string) (int, error) {
 	return msg.ID, nil
 }
 
+// MediaItem represents a photo to send, either by URL or as raw bytes.
+type MediaItem struct {
+	URL  string // URL-based photo (mutually exclusive with Data)
+	Data []byte // Generated image bytes (mutually exclusive with URL)
+	Name string // Filename for uploaded images
+}
+
 // SendPhotos sends one or more photos with an HTML caption to the configured chat.
 // The caption is truncated to 1024 characters (Telegram's limit) and attached to the first photo.
 // Returns the message ID of the first photo.
 func (b *Bot) SendPhotos(ctx context.Context, urls []string, caption string) (int, error) {
+	items := make([]MediaItem, len(urls))
+	for i, u := range urls {
+		items[i] = MediaItem{URL: u}
+	}
+	return b.SendMedia(ctx, items, caption)
+}
+
+// SendMedia sends one or more photos (URL or uploaded bytes) with an HTML caption.
+func (b *Bot) SendMedia(ctx context.Context, items []MediaItem, caption string) (int, error) {
 	if len([]rune(caption)) > 1024 {
 		caption = truncateHTML(caption, 1024)
 	}
-	if len(urls) == 1 {
+	if len(items) == 1 {
+		item := items[0]
+		var photo models.InputFile
+		if item.URL != "" {
+			photo = &models.InputFileString{Data: item.URL}
+		} else {
+			photo = &models.InputFileUpload{Filename: item.Name, Data: bytes.NewReader(item.Data)}
+		}
 		msg, err := b.bot.SendPhoto(ctx, &bot.SendPhotoParams{
 			ChatID:    b.chatID,
-			Photo:     &models.InputFileString{Data: urls[0]},
+			Photo:     photo,
 			Caption:   caption,
 			ParseMode: models.ParseModeHTML,
 		})
@@ -77,9 +101,15 @@ func (b *Bot) SendPhotos(ctx context.Context, urls []string, caption string) (in
 		}
 		return msg.ID, nil
 	}
-	media := make([]models.InputMedia, len(urls))
-	for i, u := range urls {
-		p := &models.InputMediaPhoto{Media: u}
+	media := make([]models.InputMedia, len(items))
+	for i, item := range items {
+		p := &models.InputMediaPhoto{}
+		if item.URL != "" {
+			p.Media = item.URL
+		} else {
+			p.Media = "attach://" + item.Name
+			p.MediaAttachment = bytes.NewReader(item.Data)
+		}
 		if i == 0 {
 			p.Caption = caption
 			p.ParseMode = models.ParseModeHTML
