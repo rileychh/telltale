@@ -185,10 +185,7 @@ func (b *Bot) handleReply(ctx context.Context, msg *models.Message, db *store.St
 		return
 	}
 
-	displayName := strings.TrimSpace(msg.From.FirstName + " " + msg.From.LastName)
-	if displayName == "" {
-		displayName = msg.From.Username
-	}
+	displayName := fmt.Sprintf("[%d]", msg.From.ID)
 
 	replyText := entitiesToMarkdown(msg.Text, msg.Entities)
 
