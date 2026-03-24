@@ -167,7 +167,7 @@ func (c *Client) GetCommitInfo(ctx context.Context, repo string, sha string) (sh
 var (
 	reBuildNumber = regexp.MustCompile(`\*\*Build Number:\*\*\s*(\d+)`)
 	reInstallLink = regexp.MustCompile(`\[Install build \d+\]\(([^)]+)\)`)
-	reDeployCheck = regexp.MustCompile(`- \[([ xX])\] <!-- deploy-(\w+) -->`)
+	reDeployCheck = regexp.MustCompile(`- \[([ xX])\] <!-- deploy-(\w+) --> (.+)`)
 )
 
 // FormatBuildStatus returns Telegram HTML summarizing the PR Preview build status.
@@ -213,6 +213,7 @@ func (c *Client) FormatBuildStatus(ctx context.Context, repo string, number int)
 	// Extract install links per platform section
 	type platformInfo struct {
 		checked bool
+		label   string
 		url     string
 	}
 	platforms := make(map[string]*platformInfo)
@@ -220,7 +221,7 @@ func (c *Client) FormatBuildStatus(ctx context.Context, repo string, number int)
 	for _, dc := range deployChecks {
 		checked := dc[1] != " "
 		name := dc[2]
-		platforms[name] = &platformInfo{checked: checked}
+		platforms[name] = &platformInfo{checked: checked, label: dc[3]}
 	}
 
 	// Parse install links from platform sections
@@ -259,7 +260,7 @@ func (c *Client) FormatBuildStatus(ctx context.Context, repo string, number int)
 		if info.url != "" {
 			resultParts = append(resultParts, fmt.Sprintf(`<a href="%s">Install on %s</a>`, info.url, pd.displayName))
 		} else if info.checked {
-			resultParts = append(resultParts, pd.displayName+" on TestFlight")
+			resultParts = append(resultParts, info.label)
 		} else {
 			resultParts = append(resultParts, pd.displayName+" skipped")
 		}
