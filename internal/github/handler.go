@@ -134,7 +134,7 @@ func (h *Handler) handleIssue(ctx context.Context, e *gh.IssuesEvent) {
 	)
 
 	var media []MediaRef
-	if action == "opened" {
+	if action == "opened" && e.GetSender().GetType() != "Bot" {
 		if body := issue.GetBody(); body != "" {
 			converted, refs := mdToTelegramHTML(body, repo)
 			html += "\n\n" + converted
@@ -191,7 +191,7 @@ func (h *Handler) handlePullRequest(ctx context.Context, e *gh.PullRequestEvent)
 	)
 
 	var media []MediaRef
-	if action == "opened" {
+	if action == "opened" && e.GetSender().GetType() != "Bot" {
 		if body := pr.GetBody(); body != "" {
 			converted, refs := mdToTelegramHTML(body, repo)
 			html += "\n\n" + converted
