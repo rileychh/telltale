@@ -27,6 +27,10 @@ var (
 	reTableSep        = regexp.MustCompile(`^\|[-\s|:]+\|$`)
 	reMediaMarker     = regexp.MustCompile(`\x00(IMG|TABLE)(\d+)\x00`)
 	reHorizontalRule  = regexp.MustCompile(`(?m)^[-*_]{3,}$`)
+	reHTMLTableTag    = regexp.MustCompile(`(?i)</?(?:table|thead|tbody|tfoot|tr|th|td)(?:\s[^>]*)?>`)
+	reHTMLBold        = regexp.MustCompile(`(?i)<(?:strong|b)(?:\s[^>]*)?>(.+?)</(?:strong|b)>`)
+	reHTMLItalic      = regexp.MustCompile(`(?i)<(?:em|i)(?:\s[^>]*)?>(.+?)</(?:em|i)>`)
+	reHTMLBr          = regexp.MustCompile(`(?i)<br\s*/?>`)
 	reEscDetails      = regexp.MustCompile(`(?s)&lt;details[^&]*&gt;\s*(?:&lt;summary&gt;(.*?)&lt;/summary&gt;)?\s*(.*?)\s*&lt;/details&gt;`)
 )
 
@@ -59,8 +63,14 @@ func mdToTelegramHTML(md, repo string) (string, []MediaRef) {
 	// Extract markdown tables and replace with placeholders
 	s = extractTablesWithPlaceholders(s, &tableByIdx)
 
-	// Strip horizontal rules
+	// Strip horizontal rules and HTML table layout tags
 	s = reHorizontalRule.ReplaceAllString(s, "")
+	s = reHTMLTableTag.ReplaceAllString(s, "")
+
+	// Convert common inline HTML tags to markdown equivalents
+	s = reHTMLBold.ReplaceAllString(s, "**$1**")
+	s = reHTMLItalic.ReplaceAllString(s, "*$1*")
+	s = reHTMLBr.ReplaceAllString(s, "\n")
 
 	// Protect inline code
 	var inlineCodes []string
