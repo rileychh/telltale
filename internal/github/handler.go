@@ -123,6 +123,9 @@ func (h *Handler) handleIssue(ctx context.Context, e *gh.IssuesEvent) {
 		}
 	case "reopened":
 		header = "🟢 <b>Issue reopened by " + user + "</b>"
+	case "assigned":
+		assignee := escapeHTML(e.GetAssignee().GetLogin())
+		header = "👤 <b>Issue assigned to " + assignee + " by " + user + "</b>"
 	default:
 		return
 	}
@@ -180,6 +183,9 @@ func (h *Handler) handlePullRequest(ctx context.Context, e *gh.PullRequestEvent)
 		header = "👀 <b>PR ready for review by " + user + "</b>"
 	case "converted_to_draft":
 		header = "⚪ <b>PR converted to draft by " + user + "</b>"
+	case "review_requested":
+		reviewer := escapeHTML(e.GetRequestedReviewer().GetLogin())
+		header = "👀 <b>Review requested from " + reviewer + " by " + user + "</b>"
 	default:
 		return
 	}
