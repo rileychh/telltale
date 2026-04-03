@@ -343,6 +343,10 @@ func classifyRune(r rune) runKind {
 	if isCJK(r) {
 		return runCJK
 	}
+	// Arrows and math symbols: fall back to CJK font for broader coverage
+	if r >= 0x2190 && r <= 0x22FF {
+		return runCJK
+	}
 	return runLatin
 }
 

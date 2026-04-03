@@ -23,9 +23,11 @@ var (
 	reIssueRef     = regexp.MustCompile(`(?:^|[^&\w])#(\d+)\b`)
 	reCommitSHA    = regexp.MustCompile(`\b([0-9a-f]{7,40})\b`)
 	reCodeInLink   = regexp.MustCompile(`(<a [^>]*>)<code>([^<]*)</code>(</a>)`)
-	reTableRow     = regexp.MustCompile(`^\|(.+)\|$`)
-	reTableSep     = regexp.MustCompile(`^\|[-\s|:]+\|$`)
-	reMediaMarker  = regexp.MustCompile(`\x00(IMG|TABLE)(\d+)\x00`)
+	reTableRow        = regexp.MustCompile(`^\|(.+)\|$`)
+	reTableSep        = regexp.MustCompile(`^\|[-\s|:]+\|$`)
+	reMediaMarker     = regexp.MustCompile(`\x00(IMG|TABLE)(\d+)\x00`)
+	reHorizontalRule  = regexp.MustCompile(`(?m)^[-*_]{3,}$`)
+	reEscDetails      = regexp.MustCompile(`(?s)&lt;details[^&]*&gt;\s*(?:&lt;summary&gt;(.*?)&lt;/summary&gt;)?\s*(.*?)\s*&lt;/details&gt;`)
 )
 
 // MediaRef is an image URL or a parsed table, in document order.
@@ -37,6 +39,9 @@ type MediaRef struct {
 // mdToTelegramHTML converts GitHub-flavored Markdown to Telegram-compatible HTML.
 // It returns the converted HTML and media references in document order.
 func mdToTelegramHTML(md, repo string) (string, []MediaRef) {
+	// Strip zero-width space HTML entities (used by Renovate to suppress @mentions)
+	md = strings.ReplaceAll(md, "&#8203;", "")
+
 	// Collect image URLs and tables by their placeholder index;
 	// document order is determined later by scanning for placeholders.
 	var imgURLByIdx []string          // IMG index → URL (empty if unsupported)
@@ -53,6 +58,9 @@ func mdToTelegramHTML(md, repo string) (string, []MediaRef) {
 
 	// Extract markdown tables and replace with placeholders
 	s = extractTablesWithPlaceholders(s, &tableByIdx)
+
+	// Strip horizontal rules
+	s = reHorizontalRule.ReplaceAllString(s, "")
 
 	// Protect inline code
 	var inlineCodes []string
@@ -204,6 +212,21 @@ func mdToTelegramHTML(md, repo string) (string, []MediaRef) {
 	for strings.Contains(s, "\n\n\n") {
 		s = strings.ReplaceAll(s, "\n\n\n", "\n\n")
 	}
+
+	// Convert escaped <details>/<summary> to expandable blockquotes
+	s = reEscDetails.ReplaceAllStringFunc(s, func(match string) string {
+		parts := reEscDetails.FindStringSubmatch(match)
+		summary := strings.TrimSpace(parts[1])
+		content := strings.TrimSpace(parts[2])
+		var result string
+		if summary != "" {
+			result = "<b>" + summary + "</b>\n"
+		}
+		if content != "" {
+			result += "<blockquote expandable>" + content + "</blockquote>"
+		}
+		return result
+	})
 
 	return strings.TrimSpace(s), media
 }
