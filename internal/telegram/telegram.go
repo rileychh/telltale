@@ -44,7 +44,8 @@ func New(token string, chatID string) (*Bot, error) {
 }
 
 // Send sends an HTML-formatted message to the configured chat and returns the message ID.
-func (b *Bot) Send(ctx context.Context, html string) (int, error) {
+// If replyTo > 0, the message is sent as a reply to that message.
+func (b *Bot) Send(ctx context.Context, html string, replyTo int) (int, error) {
 	msg, err := b.bot.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    b.chatID,
 		Text:      html,
@@ -52,11 +53,25 @@ func (b *Bot) Send(ctx context.Context, html string) (int, error) {
 		LinkPreviewOptions: &models.LinkPreviewOptions{
 			IsDisabled: bot.True(),
 		},
+		ReplyParameters: replyParams(replyTo),
 	})
 	if err != nil {
 		return 0, err
 	}
 	return msg.ID, nil
+}
+
+// replyParams builds a ReplyParameters value for the given message ID, or nil
+// if no reply target is set. AllowSendingWithoutReply ensures the send still
+// succeeds if the referenced message was deleted.
+func replyParams(replyTo int) *models.ReplyParameters {
+	if replyTo <= 0 {
+		return nil
+	}
+	return &models.ReplyParameters{
+		MessageID:                replyTo,
+		AllowSendingWithoutReply: true,
+	}
 }
 
 // MediaItem represents a photo to send, either by URL or as raw bytes.
@@ -66,19 +81,9 @@ type MediaItem struct {
 	Name string // Filename for uploaded images
 }
 
-// SendPhotos sends one or more photos with an HTML caption to the configured chat.
-// The caption is truncated to 1024 characters (Telegram's limit) and attached to the first photo.
-// Returns the message ID of the first photo.
-func (b *Bot) SendPhotos(ctx context.Context, urls []string, caption string) (int, error) {
-	items := make([]MediaItem, len(urls))
-	for i, u := range urls {
-		items[i] = MediaItem{URL: u}
-	}
-	return b.SendMedia(ctx, items, caption)
-}
-
 // SendMedia sends one or more photos (URL or uploaded bytes) with an HTML caption.
-func (b *Bot) SendMedia(ctx context.Context, items []MediaItem, caption string) (int, error) {
+// If replyTo > 0, the message is sent as a reply to that message.
+func (b *Bot) SendMedia(ctx context.Context, items []MediaItem, caption string, replyTo int) (int, error) {
 	if len([]rune(caption)) > 1024 {
 		caption = truncateHTML(caption, 1024)
 	}
@@ -91,10 +96,11 @@ func (b *Bot) SendMedia(ctx context.Context, items []MediaItem, caption string) 
 			photo = &models.InputFileUpload{Filename: item.Name, Data: bytes.NewReader(item.Data)}
 		}
 		msg, err := b.bot.SendPhoto(ctx, &bot.SendPhotoParams{
-			ChatID:    b.chatID,
-			Photo:     photo,
-			Caption:   caption,
-			ParseMode: models.ParseModeHTML,
+			ChatID:          b.chatID,
+			Photo:           photo,
+			Caption:         caption,
+			ParseMode:       models.ParseModeHTML,
+			ReplyParameters: replyParams(replyTo),
 		})
 		if err != nil {
 			return 0, err
@@ -117,8 +123,9 @@ func (b *Bot) SendMedia(ctx context.Context, items []MediaItem, caption string) 
 		media[i] = p
 	}
 	msgs, err := b.bot.SendMediaGroup(ctx, &bot.SendMediaGroupParams{
-		ChatID: b.chatID,
-		Media:  media,
+		ChatID:          b.chatID,
+		Media:           media,
+		ReplyParameters: replyParams(replyTo),
 	})
 	if err != nil {
 		return 0, err
@@ -225,6 +232,12 @@ func (b *Bot) handleReply(ctx context.Context, msg *models.Message, db *store.St
 	// Save the user's message so replies to it resolve to the new comment
 	if err := db.Save(msg.ID, repo, issueNumber, false, newCommentID, "", isReviewComment); err != nil {
 		log.Printf("failed to save reply mapping: %v", err)
+	}
+
+	// Extend the reply chain: subsequent GitHub events for this issue/PR should
+	// reply to the user's Telegram message rather than skipping over it.
+	if err := db.SaveLatest(repo, issueNumber, msg.ID); err != nil {
+		log.Printf("failed to update latest message: %v", err)
 	}
 
 	log.Printf("posted reply from %s to %s#%d", displayName, repo, issueNumber)

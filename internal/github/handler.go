@@ -37,15 +37,34 @@ func NewHandler(secret string, tg *telegram.Bot, db *store.Store) *Handler {
 }
 
 // send sends an HTML message, using a photo or media group when media is present.
-func (h *Handler) send(ctx context.Context, html string, refs []MediaRef) (int, error) {
+// If replyTo > 0, the message is sent as a reply to that Telegram message ID.
+func (h *Handler) send(ctx context.Context, html string, refs []MediaRef, replyTo int) (int, error) {
 	media := resolveMedia(refs)
 	if len(media) == 0 {
-		return h.tg.Send(ctx, html)
+		return h.tg.Send(ctx, html, replyTo)
 	}
-	msgID, err := h.tg.SendMedia(ctx, media, html)
+	msgID, err := h.tg.SendMedia(ctx, media, html, replyTo)
 	if err != nil {
 		log.Printf("failed to send media, falling back to text: %v", err)
-		return h.tg.Send(ctx, html)
+		return h.tg.Send(ctx, html, replyTo)
+	}
+	return msgID, nil
+}
+
+// sendThreaded sends a notification that replies to the latest prior
+// notification for this issue/PR (if any), then records the new message as
+// the latest for future notifications.
+func (h *Handler) sendThreaded(ctx context.Context, repo string, issueNumber int, html string, refs []MediaRef) (int, error) {
+	replyTo, err := h.db.LookupLatest(repo, issueNumber)
+	if err != nil {
+		log.Printf("failed to look up latest message for %s#%d: %v", repo, issueNumber, err)
+	}
+	msgID, err := h.send(ctx, html, refs, replyTo)
+	if err != nil {
+		return 0, err
+	}
+	if err := h.db.SaveLatest(repo, issueNumber, msgID); err != nil {
+		log.Printf("failed to save latest message for %s#%d: %v", repo, issueNumber, err)
 	}
 	return msgID, nil
 }
@@ -145,7 +164,7 @@ func (h *Handler) handleIssue(ctx context.Context, e *gh.IssuesEvent) {
 		}
 	}
 
-	msgID, err := h.send(ctx, html, media)
+	msgID, err := h.sendThreaded(ctx, repo, issue.GetNumber(), html, media)
 	if err != nil {
 		log.Printf("failed to send issue notification: %v", err)
 		return
@@ -205,7 +224,7 @@ func (h *Handler) handlePullRequest(ctx context.Context, e *gh.PullRequestEvent)
 		}
 	}
 
-	msgID, err := h.send(ctx, html, media)
+	msgID, err := h.sendThreaded(ctx, repo, pr.GetNumber(), html, media)
 	if err != nil {
 		log.Printf("failed to send PR notification: %v", err)
 		return
@@ -249,7 +268,7 @@ func (h *Handler) handleIssueComment(ctx context.Context, e *gh.IssueCommentEven
 		media = refs
 	}
 
-	msgID, err := h.send(ctx, html, media)
+	msgID, err := h.sendThreaded(ctx, repo, issue.GetNumber(), html, media)
 	if err != nil {
 		log.Printf("failed to send comment notification: %v", err)
 		return
@@ -374,7 +393,7 @@ func (h *Handler) sendConsolidatedReview(p *pendingReview) {
 		return "[" + kind + " #" + strconv.Itoa(imgNum) + "]"
 	})
 
-	msgID, err := h.send(ctx, html, media)
+	msgID, err := h.sendThreaded(ctx, repo, pr.GetNumber(), html, media)
 	if err != nil {
 		log.Printf("failed to send consolidated review for %s#%d: %v", repo, pr.GetNumber(), err)
 		return
@@ -415,7 +434,7 @@ func (h *Handler) sendSingleReviewComment(e *gh.PullRequestReviewCommentEvent) {
 		media = refs
 	}
 
-	msgID, err := h.send(ctx, html, media)
+	msgID, err := h.sendThreaded(ctx, repo, pr.GetNumber(), html, media)
 	if err != nil {
 		log.Printf("failed to send review comment notification: %v", err)
 		return

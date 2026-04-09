@@ -35,6 +35,17 @@ func Open(path string) (*Store, error) {
 	// Migration: add is_review_comment column if missing
 	db.Exec(`ALTER TABLE message_map ADD COLUMN is_review_comment BOOLEAN NOT NULL DEFAULT FALSE`)
 
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS thread_latest (
+			repo          TEXT NOT NULL,
+			issue_number  INTEGER NOT NULL,
+			latest_msg_id INTEGER NOT NULL,
+			PRIMARY KEY (repo, issue_number)
+		)
+	`); err != nil {
+		return nil, fmt.Errorf("create thread_latest table: %w", err)
+	}
+
 	return &Store{db: db}, nil
 }
 
@@ -51,6 +62,29 @@ func (s *Store) Save(telegramMsgID int, repo string, issueNumber int, isPR bool,
 		telegramMsgID, repo, issueNumber, isPR, commentID, quoteText, isReviewComment,
 	)
 	return err
+}
+
+// SaveLatest records the most recent bot-sent notification message for an issue/PR.
+func (s *Store) SaveLatest(repo string, issueNumber int, telegramMsgID int) error {
+	_, err := s.db.Exec(
+		`INSERT OR REPLACE INTO thread_latest (repo, issue_number, latest_msg_id) VALUES (?, ?, ?)`,
+		repo, issueNumber, telegramMsgID,
+	)
+	return err
+}
+
+// LookupLatest returns the most recent bot-sent notification message ID for an
+// issue/PR, or 0 if none is known.
+func (s *Store) LookupLatest(repo string, issueNumber int) (int, error) {
+	var msgID int
+	err := s.db.QueryRow(
+		`SELECT latest_msg_id FROM thread_latest WHERE repo = ? AND issue_number = ?`,
+		repo, issueNumber,
+	).Scan(&msgID)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	return msgID, err
 }
 
 // Lookup finds the GitHub issue/PR associated with a Telegram message.

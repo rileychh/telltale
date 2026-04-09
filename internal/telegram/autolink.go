@@ -62,7 +62,7 @@ func (b *Bot) handleAutolinks(ctx context.Context, msg *models.Message) {
 		return
 	}
 
-	msgID, err := b.Send(ctx, strings.Join(parts, "\n\n"))
+	msgID, err := b.Send(ctx, strings.Join(parts, "\n\n"), 0)
 	if err != nil {
 		log.Printf("failed to send autolink notification: %v", err)
 		return
