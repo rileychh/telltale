@@ -185,7 +185,7 @@ func (b *Bot) handleReply(ctx context.Context, msg *models.Message, db *store.St
 		return
 	}
 
-	displayName := fmt.Sprintf("[%d]", msg.From.ID)
+	displayName := telegramDisplayName(msg.From)
 
 	replyText := entitiesToMarkdown(msg.Text, msg.Entities)
 
@@ -228,6 +228,22 @@ func (b *Bot) handleReply(ctx context.Context, msg *models.Message, db *store.St
 	}
 
 	log.Printf("posted reply from %s to %s#%d", displayName, repo, issueNumber)
+}
+
+// telegramDisplayName returns a human-readable name for a Telegram user,
+// preferring @username, then full name, and falling back to numeric ID.
+func telegramDisplayName(u *models.User) string {
+	if u == nil {
+		return "[unknown]"
+	}
+	if u.Username != "" {
+		return "@" + u.Username
+	}
+	name := strings.TrimSpace(u.FirstName + " " + u.LastName)
+	if name != "" {
+		return name
+	}
+	return fmt.Sprintf("[%d]", u.ID)
 }
 
 // entitiesToMarkdown converts Telegram text + entities to GitHub-flavored Markdown.
