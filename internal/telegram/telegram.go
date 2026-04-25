@@ -196,9 +196,15 @@ func (b *Bot) handleReply(ctx context.Context, msg *models.Message, db *store.St
 
 	replyText := entitiesToMarkdown(msg.Text, msg.Entities)
 
-	// Fetch the original content to quote
+	// Determine what to quote. If the user manually selected a portion via
+	// Telegram's quote-reply, use that verbatim; otherwise fall back to the
+	// stored quote text or the original GitHub body.
 	var body string
-	if quoteText != "" {
+	var skipStrip bool
+	if msg.Quote != nil && msg.Quote.IsManual && msg.Quote.Text != "" {
+		body = entitiesToMarkdown(msg.Quote.Text, msg.Quote.Entities)
+		skipStrip = true
+	} else if quoteText != "" {
 		body = quoteText
 	} else {
 		_, body, err = gh.GetQuoteContext(ctx, repo, issueNumber, commentID, isReviewComment)
@@ -209,7 +215,9 @@ func (b *Bot) handleReply(ctx context.Context, msg *models.Message, db *store.St
 
 	var commentBody string
 	if body != "" {
-		body = stripQuotes(body)
+		if !skipStrip {
+			body = stripQuotes(body)
+		}
 		quoted := quoteLines(body)
 		commentBody = fmt.Sprintf("%s\n\n*%s on Telegram:*\n%s", quoted, displayName, replyText)
 	} else {
