@@ -165,14 +165,14 @@ func (c *Client) GetCommitInfo(ctx context.Context, repo string, sha string) (sh
 }
 
 var (
-	reBuildNumber = regexp.MustCompile(`\*\*Build Number:\*\*\s*(\d+)`)
-	reInstallLink = regexp.MustCompile(`\[Install build \d+\]\(([^)]+)\)`)
-	reDeployCheck = regexp.MustCompile(`- \[([ xX])\] <!-- deploy-(\w+) --> (.+)`)
+	reBuildNumber  = regexp.MustCompile(`\*\*Build Number:\*\*\s*(\d+)`)
+	reInstallLink  = regexp.MustCompile(`\[Install build \d+\]\(([^)]+)\)`)
+	reSectionTitle = regexp.MustCompile(`^([^\n(]+?)(?:\s*\(([^)]+)\))?\s*$`)
 )
 
 // FormatBuildStatus returns Telegram HTML summarizing the PR Preview build status.
-// It finds the <!-- pr-preview-comment --> comment on the PR and extracts
-// the build number and install links.
+// It finds the <!-- pr-preview-comment --> comment on the PR and extracts the
+// build number and one entry per `### Platform (Channel)` section.
 func (c *Client) FormatBuildStatus(ctx context.Context, repo string, number int) (string, error) {
 	client, err := c.clientForRepo(ctx, repo)
 	if err != nil {
@@ -181,7 +181,6 @@ func (c *Client) FormatBuildStatus(ctx context.Context, repo string, number int)
 
 	parts := strings.SplitN(repo, "/", 2)
 
-	// Find the PR preview comment
 	comments, _, err := client.Issues.ListComments(ctx, parts[0], parts[1], number, &gh.IssueListCommentsOptions{
 		ListOptions: gh.ListOptions{PerPage: 100},
 	})
@@ -200,69 +199,35 @@ func (c *Client) FormatBuildStatus(ctx context.Context, repo string, number int)
 		return "", nil
 	}
 
-	// Extract build number
 	buildMatch := reBuildNumber.FindStringSubmatch(previewBody)
 	if buildMatch == nil {
 		return "", nil
 	}
-	buildNumber := buildMatch[1]
 
-	// Extract deploy checkboxes to determine platform status
-	deployChecks := reDeployCheck.FindAllStringSubmatch(previewBody, -1)
+	resultParts := []string{fmt.Sprintf("Build %s", buildMatch[1])}
 
-	// Extract install links per platform section
-	type platformInfo struct {
-		checked bool
-		label   string
-		url     string
-	}
-	platforms := make(map[string]*platformInfo)
-
-	for _, dc := range deployChecks {
-		checked := dc[1] != " "
-		name := dc[2]
-		platforms[name] = &platformInfo{checked: checked, label: dc[3]}
-	}
-
-	// Parse install links from platform sections
-	sections := strings.Split(previewBody, "### ")
-	for _, section := range sections {
-		link := reInstallLink.FindStringSubmatch(section)
-		if link == nil {
-			continue
-		}
-		sectionLower := strings.ToLower(section)
-		for name, info := range platforms {
-			if strings.HasPrefix(sectionLower, name) {
-				info.url = link[1]
-			}
-		}
-	}
-
-	// Format output: "Build 680 ⋅ Install on Android ⋅ iOS skipped"
-	var resultParts []string
-	resultParts = append(resultParts, fmt.Sprintf("Build %s", buildNumber))
-
-	type platformDef struct {
-		key         string
-		displayName string
-	}
-	platformDefs := []platformDef{
-		{"android", "Android"},
-		{"ios", "iOS"},
-	}
-
-	for _, pd := range platformDefs {
-		info, ok := platforms[pd.key]
+	// Each `### Platform (Channel)` section contributes one entry. A section
+	// with an install link becomes a clickable "Install on Platform"; without
+	// one, fall back to "Platform via Channel" (e.g. iOS via TestFlight).
+	sections := strings.Split(previewBody, "\n### ")
+	for _, section := range sections[1:] {
+		title, body, ok := strings.Cut(section, "\n")
 		if !ok {
 			continue
 		}
-		if info.url != "" {
-			resultParts = append(resultParts, fmt.Sprintf(`<a href="%s">Install on %s</a>`, info.url, pd.displayName))
-		} else if info.checked {
-			resultParts = append(resultParts, info.label)
+		titleMatch := reSectionTitle.FindStringSubmatch(title)
+		if titleMatch == nil {
+			continue
+		}
+		platform := strings.TrimSpace(titleMatch[1])
+		channel := strings.TrimSpace(titleMatch[2])
+
+		if link := reInstallLink.FindStringSubmatch(body); link != nil {
+			resultParts = append(resultParts, fmt.Sprintf(`<a href="%s">Install on %s</a>`, link[1], platform))
+		} else if channel != "" {
+			resultParts = append(resultParts, fmt.Sprintf("%s via %s", platform, channel))
 		} else {
-			resultParts = append(resultParts, pd.displayName+" skipped")
+			resultParts = append(resultParts, platform)
 		}
 	}
 
