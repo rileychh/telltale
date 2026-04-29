@@ -167,6 +167,63 @@ func (c *Client) CreateReviewReply(ctx context.Context, repo string, number int,
 	return reply.GetID(), nil
 }
 
+// EditIssueComment updates the body of an issue or PR comment.
+func (c *Client) EditIssueComment(ctx context.Context, repo string, commentID int64, body string) error {
+	client, err := c.clientForRepo(ctx, repo)
+	if err != nil {
+		return err
+	}
+	parts := strings.SplitN(repo, "/", 2)
+	_, _, err = client.Issues.EditComment(ctx, parts[0], parts[1], commentID, &gh.IssueComment{
+		Body: gh.Ptr(body),
+	})
+	return err
+}
+
+// EditReviewComment updates the body of a pull request review comment.
+func (c *Client) EditReviewComment(ctx context.Context, repo string, commentID int64, body string) error {
+	client, err := c.clientForRepo(ctx, repo)
+	if err != nil {
+		return err
+	}
+	parts := strings.SplitN(repo, "/", 2)
+	_, _, err = client.PullRequests.EditComment(ctx, parts[0], parts[1], commentID, &gh.PullRequestComment{
+		Body: gh.Ptr(body),
+	})
+	return err
+}
+
+// GetReviewWithComments fetches a review and all of its inline comments. Used
+// to re-render a consolidated review message after one of its inline comments
+// changes.
+func (c *Client) GetReviewWithComments(ctx context.Context, repo string, prNumber int, reviewID int64) (*gh.PullRequestReview, []*gh.PullRequestComment, error) {
+	client, err := c.clientForRepo(ctx, repo)
+	if err != nil {
+		return nil, nil, err
+	}
+	parts := strings.SplitN(repo, "/", 2)
+
+	review, _, err := client.PullRequests.GetReview(ctx, parts[0], parts[1], prNumber, reviewID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("get review: %w", err)
+	}
+
+	var all []*gh.PullRequestComment
+	opt := &gh.ListOptions{PerPage: 100}
+	for {
+		page, resp, err := client.PullRequests.ListReviewComments(ctx, parts[0], parts[1], prNumber, reviewID, opt)
+		if err != nil {
+			return nil, nil, fmt.Errorf("list review comments: %w", err)
+		}
+		all = append(all, page...)
+		if resp.NextPage == 0 {
+			break
+		}
+		opt.Page = resp.NextPage
+	}
+	return review, all, nil
+}
+
 // GetIssueOrPR fetches info about a GitHub issue or pull request.
 func (c *Client) GetIssueOrPR(ctx context.Context, repo string, number int) (title, htmlURL, headSHA string, isPR bool, err error) {
 	client, err := c.clientForRepo(ctx, repo)

@@ -20,6 +20,8 @@ type GitHubClient interface {
 	CreateReviewReply(ctx context.Context, repo string, number int, commentID int64, body string) (int64, error)
 	GetQuoteContext(ctx context.Context, repo string, number int, commentID int64, isReviewComment bool) (author, body string, err error)
 	IsLatestComment(ctx context.Context, repo string, number int, commentID int64, isReviewComment bool) (bool, error)
+	EditIssueComment(ctx context.Context, repo string, commentID int64, body string) error
+	EditReviewComment(ctx context.Context, repo string, commentID int64, body string) error
 }
 
 // Bot wraps the Telegram bot for sending notifications.
@@ -148,6 +150,80 @@ func (b *Bot) react(ctx context.Context, chatID int64, msgID int, emoji string) 
 	})
 }
 
+// EditMessage edits the text of a previously sent text message.
+func (b *Bot) EditMessage(ctx context.Context, msgID int, html string) error {
+	_, err := b.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
+		ChatID:    b.chatID,
+		MessageID: msgID,
+		Text:      html,
+		ParseMode: models.ParseModeHTML,
+		LinkPreviewOptions: &models.LinkPreviewOptions{
+			IsDisabled: bot.True(),
+		},
+	})
+	if isNotModified(err) {
+		return nil
+	}
+	return err
+}
+
+// EditCaption edits the caption of a previously sent photo or media group.
+// The caption is truncated to Telegram's 1024-rune limit.
+func (b *Bot) EditCaption(ctx context.Context, msgID int, caption string) error {
+	if len([]rune(caption)) > 1024 {
+		caption = truncateHTML(caption, 1024)
+	}
+	_, err := b.bot.EditMessageCaption(ctx, &bot.EditMessageCaptionParams{
+		ChatID:    b.chatID,
+		MessageID: msgID,
+		Caption:   caption,
+		ParseMode: models.ParseModeHTML,
+	})
+	if isNotModified(err) {
+		return nil
+	}
+	return err
+}
+
+// EditOrCaption edits a text message's text or a media message's caption,
+// dispatching based on hasMedia recorded at send time.
+func (b *Bot) EditOrCaption(ctx context.Context, msgID int, hasMedia bool, content string) error {
+	if hasMedia {
+		return b.EditCaption(ctx, msgID, content)
+	}
+	return b.EditMessage(ctx, msgID, content)
+}
+
+// DeleteMessage deletes a message from the configured chat. A
+// "message to delete not found" response is treated as success.
+func (b *Bot) DeleteMessage(ctx context.Context, msgID int) error {
+	_, err := b.bot.DeleteMessage(ctx, &bot.DeleteMessageParams{
+		ChatID:    b.chatID,
+		MessageID: msgID,
+	})
+	if isAlreadyGone(err) {
+		return nil
+	}
+	return err
+}
+
+// isNotModified reports whether err is Telegram's "message is not modified"
+// response, which we treat as a successful no-op.
+func isNotModified(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "message is not modified")
+}
+
+// isAlreadyGone reports whether err indicates the target message no longer
+// exists, which makes a delete request trivially successful.
+func isAlreadyGone(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "message to delete not found") ||
+		strings.Contains(msg, "message can't be deleted")
+}
+
 // StartWebhook starts processing incoming Telegram updates.
 func (b *Bot) StartWebhook(ctx context.Context) {
 	b.bot.StartWebhook(ctx)
@@ -183,6 +259,14 @@ func (b *Bot) RegisterReplyHandler(mux *http.ServeMux, path string, db *store.St
 		}
 	})
 
+	// Propagate user-side edits of a tracked reply to the GitHub comment we
+	// created from that reply.
+	b.bot.RegisterHandlerMatchFunc(func(update *models.Update) bool {
+		return update.EditedMessage != nil && update.EditedMessage.Text != ""
+	}, func(ctx context.Context, _ *bot.Bot, update *models.Update) {
+		b.handleEdit(ctx, update.EditedMessage, db, gh)
+	})
+
 	mux.Handle("POST "+path, b.bot.WebhookHandler())
 }
 
@@ -194,47 +278,7 @@ func (b *Bot) handleReply(ctx context.Context, msg *models.Message, db *store.St
 	}
 
 	displayName := telegramDisplayName(msg.From)
-
-	replyText := entitiesToMarkdown(msg.Text, msg.Entities)
-
-	// Determine what to quote. If the user manually selected a portion via
-	// Telegram's quote-reply, use that verbatim; otherwise fall back to the
-	// stored quote text or the original GitHub body.
-	var body string
-	var manualQuote bool
-	if msg.Quote != nil && msg.Quote.IsManual && msg.Quote.Text != "" {
-		body = entitiesToMarkdown(msg.Quote.Text, msg.Quote.Entities)
-		manualQuote = true
-	} else if quoteText != "" {
-		body = quoteText
-	} else {
-		_, body, err = gh.GetQuoteContext(ctx, repo, issueNumber, commentID, isReviewComment)
-		if err != nil {
-			log.Printf("failed to fetch quote context: %v", err)
-		}
-	}
-
-	// Suppress an auto-derived quote when GitHub will already render the
-	// referenced comment directly above this reply.
-	if body != "" && !manualQuote && commentID > 0 {
-		latest, err := gh.IsLatestComment(ctx, repo, issueNumber, commentID, isReviewComment)
-		if err != nil {
-			log.Printf("failed to check latest comment: %v", err)
-		} else if latest {
-			body = ""
-		}
-	}
-
-	var commentBody string
-	if body != "" {
-		if !manualQuote {
-			body = stripQuotes(body)
-		}
-		quoted := quoteLines(body)
-		commentBody = fmt.Sprintf("%s\n\n*%s on Telegram:*\n%s", quoted, displayName, replyText)
-	} else {
-		commentBody = fmt.Sprintf("*%s on Telegram:*\n%s", displayName, replyText)
-	}
+	commentBody := buildCommentBody(ctx, gh, msg, displayName, repo, issueNumber, commentID, quoteText, isReviewComment)
 
 	var newCommentID int64
 	if isReviewComment && commentID > 0 {
@@ -261,6 +305,92 @@ func (b *Bot) handleReply(ctx context.Context, msg *models.Message, db *store.St
 	}
 
 	log.Printf("posted reply from %s to %s#%d", displayName, repo, issueNumber)
+}
+
+// handleEdit propagates an edit of a tracked Telegram reply to the GitHub
+// comment that was originally created from it.
+func (b *Bot) handleEdit(ctx context.Context, msg *models.Message, db *store.Store, gh GitHubClient) {
+	// Defense in depth: a bot can never edit a user's reply, and Telegram does
+	// not normally fire edited_message for the bot's own message edits, but
+	// guard against it so a stray update never PATCHes someone else's GitHub
+	// comment using the bot's notification mapping.
+	if msg.From == nil || msg.From.IsBot {
+		return
+	}
+
+	repo, issueNumber, _, newCommentID, _, isReviewComment, err := db.Lookup(msg.ID)
+	if err != nil || newCommentID == 0 {
+		return
+	}
+
+	// Re-derive the quote target from the original reply chain.
+	var targetCommentID int64
+	var targetQuoteText string
+	var targetIsReviewComment bool
+	if msg.ReplyToMessage != nil {
+		_, _, _, targetCommentID, targetQuoteText, targetIsReviewComment, err = db.Lookup(msg.ReplyToMessage.ID)
+		if err != nil {
+			log.Printf("edit: target lookup failed: %v", err)
+		}
+	}
+
+	displayName := telegramDisplayName(msg.From)
+	commentBody := buildCommentBody(ctx, gh, msg, displayName, repo, issueNumber, targetCommentID, targetQuoteText, targetIsReviewComment)
+
+	if isReviewComment {
+		err = gh.EditReviewComment(ctx, repo, newCommentID, commentBody)
+	} else {
+		err = gh.EditIssueComment(ctx, repo, newCommentID, commentBody)
+	}
+	if err != nil {
+		log.Printf("failed to edit comment %d on %s: %v", newCommentID, repo, err)
+		return
+	}
+
+	b.react(ctx, msg.Chat.ID, msg.ID, "👀")
+	log.Printf("edited GitHub comment %d on %s#%d from %s", newCommentID, repo, issueNumber, displayName)
+}
+
+// buildCommentBody constructs the GitHub comment body for a Telegram reply.
+// It quotes the target context (manual selection, cached quoteText, or fetched
+// from GitHub) above a "*Name on Telegram:*" header followed by the reply
+// text. Used by both the create and edit paths so they stay in lockstep.
+func buildCommentBody(ctx context.Context, gh GitHubClient, msg *models.Message, displayName, repo string, issueNumber int, commentID int64, quoteText string, isReviewComment bool) string {
+	replyText := entitiesToMarkdown(msg.Text, msg.Entities)
+
+	var body string
+	var manualQuote bool
+	if msg.Quote != nil && msg.Quote.IsManual && msg.Quote.Text != "" {
+		body = entitiesToMarkdown(msg.Quote.Text, msg.Quote.Entities)
+		manualQuote = true
+	} else if quoteText != "" {
+		body = quoteText
+	} else if commentID > 0 || issueNumber > 0 {
+		var err error
+		_, body, err = gh.GetQuoteContext(ctx, repo, issueNumber, commentID, isReviewComment)
+		if err != nil {
+			log.Printf("failed to fetch quote context: %v", err)
+		}
+	}
+
+	// Suppress an auto-derived quote when GitHub will already render the
+	// referenced comment directly above this reply.
+	if body != "" && !manualQuote && commentID > 0 {
+		latest, err := gh.IsLatestComment(ctx, repo, issueNumber, commentID, isReviewComment)
+		if err != nil {
+			log.Printf("failed to check latest comment: %v", err)
+		} else if latest {
+			body = ""
+		}
+	}
+
+	if body == "" {
+		return fmt.Sprintf("*%s on Telegram:*\n%s", displayName, replyText)
+	}
+	if !manualQuote {
+		body = stripQuotes(body)
+	}
+	return fmt.Sprintf("%s\n\n*%s on Telegram:*\n%s", quoteLines(body), displayName, replyText)
 }
 
 // telegramDisplayName returns a human-readable name for a Telegram user,

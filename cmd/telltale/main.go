@@ -34,7 +34,7 @@ func main() {
 		log.Fatalf("failed to create github client: %v", err)
 	}
 
-	ghHandler := github.NewHandler(cfg.GitHubWebhookSecret, tg, db)
+	ghHandler := github.NewHandler(cfg.GitHubWebhookSecret, tg, db, ghClient)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /webhook/github", ghHandler.ServeHTTP)

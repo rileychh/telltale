@@ -46,6 +46,22 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("create thread_latest table: %w", err)
 	}
 
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS entity_index (
+			repo            TEXT NOT NULL,
+			entity_type     TEXT NOT NULL,
+			entity_id       INTEGER NOT NULL,
+			telegram_msg_id INTEGER NOT NULL,
+			has_media       BOOLEAN NOT NULL DEFAULT FALSE,
+			PRIMARY KEY (repo, entity_type, entity_id)
+		)
+	`); err != nil {
+		return nil, fmt.Errorf("create entity_index table: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_entity_msg ON entity_index(telegram_msg_id)`); err != nil {
+		return nil, fmt.Errorf("create entity_msg index: %w", err)
+	}
+
 	return &Store{db: db}, nil
 }
 
@@ -94,4 +110,46 @@ func (s *Store) Lookup(telegramMsgID int) (repo string, issueNumber int, isPR bo
 		telegramMsgID,
 	).Scan(&repo, &issueNumber, &isPR, &commentID, &quoteText, &isReviewComment)
 	return
+}
+
+// LinkEntity associates a GitHub entity (issue body, PR body, comment, review,
+// or inline comment within a consolidated review) with the Telegram message
+// that displays it. Multiple entities may map to the same Telegram message
+// (e.g. all inline comments in a consolidated review).
+func (s *Store) LinkEntity(repo, entityType string, entityID int64, telegramMsgID int, hasMedia bool) error {
+	_, err := s.db.Exec(
+		`INSERT OR REPLACE INTO entity_index (repo, entity_type, entity_id, telegram_msg_id, has_media) VALUES (?, ?, ?, ?, ?)`,
+		repo, entityType, entityID, telegramMsgID, hasMedia,
+	)
+	return err
+}
+
+// LookupEntity returns the Telegram message ID for a GitHub entity. Returns
+// sql.ErrNoRows when there is no link.
+func (s *Store) LookupEntity(repo, entityType string, entityID int64) (telegramMsgID int, hasMedia bool, err error) {
+	err = s.db.QueryRow(
+		`SELECT telegram_msg_id, has_media FROM entity_index WHERE repo = ? AND entity_type = ? AND entity_id = ?`,
+		repo, entityType, entityID,
+	).Scan(&telegramMsgID, &hasMedia)
+	return
+}
+
+// UnlinkEntity removes the link for a single GitHub entity. Used after a
+// comment is deleted on GitHub.
+func (s *Store) UnlinkEntity(repo, entityType string, entityID int64) error {
+	_, err := s.db.Exec(
+		`DELETE FROM entity_index WHERE repo = ? AND entity_type = ? AND entity_id = ?`,
+		repo, entityType, entityID,
+	)
+	return err
+}
+
+// UnlinkAllForMessage removes all entity links pointing to a Telegram message.
+// Used when a message is deleted (e.g. cascading cleanup).
+func (s *Store) UnlinkAllForMessage(telegramMsgID int) error {
+	_, err := s.db.Exec(
+		`DELETE FROM entity_index WHERE telegram_msg_id = ?`,
+		telegramMsgID,
+	)
+	return err
 }
