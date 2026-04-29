@@ -83,6 +83,58 @@ func (c *Client) GetQuoteContext(ctx context.Context, repo string, number int, c
 	return issue.GetUser().GetLogin(), issue.GetBody(), nil
 }
 
+// IsLatestComment reports whether commentID is the most recent comment on the
+// issue or PR (review comments and issue comments are checked separately).
+// Used to suppress redundant quote prefixes when replying to the latest comment.
+func (c *Client) IsLatestComment(ctx context.Context, repo string, number int, commentID int64, isReviewComment bool) (bool, error) {
+	client, err := c.clientForRepo(ctx, repo)
+	if err != nil {
+		return false, err
+	}
+	parts := strings.SplitN(repo, "/", 2)
+
+	if isReviewComment {
+		comments, _, err := client.PullRequests.ListComments(ctx, parts[0], parts[1], number, &gh.PullRequestListCommentsOptions{
+			Sort:        "created",
+			Direction:   "desc",
+			ListOptions: gh.ListOptions{PerPage: 1},
+		})
+		if err != nil {
+			return false, fmt.Errorf("list review comments: %w", err)
+		}
+		if len(comments) == 0 {
+			return false, nil
+		}
+		return comments[0].GetID() == commentID, nil
+	}
+
+	// The per-issue comments endpoint ignores sort/direction and always returns
+	// oldest first. Walk to the last page to find the most recent comment.
+	probe, resp, err := client.Issues.ListComments(ctx, parts[0], parts[1], number, &gh.IssueListCommentsOptions{
+		ListOptions: gh.ListOptions{PerPage: 1},
+	})
+	if err != nil {
+		return false, fmt.Errorf("list comments: %w", err)
+	}
+	if resp == nil || resp.LastPage == 0 {
+		// Single page or empty issue.
+		if len(probe) == 0 {
+			return false, nil
+		}
+		return probe[0].GetID() == commentID, nil
+	}
+	last, _, err := client.Issues.ListComments(ctx, parts[0], parts[1], number, &gh.IssueListCommentsOptions{
+		ListOptions: gh.ListOptions{PerPage: 1, Page: resp.LastPage},
+	})
+	if err != nil {
+		return false, fmt.Errorf("list comments page %d: %w", resp.LastPage, err)
+	}
+	if len(last) == 0 {
+		return false, nil
+	}
+	return last[0].GetID() == commentID, nil
+}
+
 // CreateComment posts a comment on an issue or PR and returns the new comment's ID.
 func (c *Client) CreateComment(ctx context.Context, repo string, number int, body string) (int64, error) {
 	client, err := c.clientForRepo(ctx, repo)

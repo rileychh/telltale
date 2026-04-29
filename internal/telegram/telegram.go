@@ -19,6 +19,7 @@ type GitHubClient interface {
 	CreateComment(ctx context.Context, repo string, number int, body string) (int64, error)
 	CreateReviewReply(ctx context.Context, repo string, number int, commentID int64, body string) (int64, error)
 	GetQuoteContext(ctx context.Context, repo string, number int, commentID int64, isReviewComment bool) (author, body string, err error)
+	IsLatestComment(ctx context.Context, repo string, number int, commentID int64, isReviewComment bool) (bool, error)
 }
 
 // Bot wraps the Telegram bot for sending notifications.
@@ -200,10 +201,10 @@ func (b *Bot) handleReply(ctx context.Context, msg *models.Message, db *store.St
 	// Telegram's quote-reply, use that verbatim; otherwise fall back to the
 	// stored quote text or the original GitHub body.
 	var body string
-	var skipStrip bool
+	var manualQuote bool
 	if msg.Quote != nil && msg.Quote.IsManual && msg.Quote.Text != "" {
 		body = entitiesToMarkdown(msg.Quote.Text, msg.Quote.Entities)
-		skipStrip = true
+		manualQuote = true
 	} else if quoteText != "" {
 		body = quoteText
 	} else {
@@ -213,9 +214,20 @@ func (b *Bot) handleReply(ctx context.Context, msg *models.Message, db *store.St
 		}
 	}
 
+	// Suppress an auto-derived quote when GitHub will already render the
+	// referenced comment directly above this reply.
+	if body != "" && !manualQuote && commentID > 0 {
+		latest, err := gh.IsLatestComment(ctx, repo, issueNumber, commentID, isReviewComment)
+		if err != nil {
+			log.Printf("failed to check latest comment: %v", err)
+		} else if latest {
+			body = ""
+		}
+	}
+
 	var commentBody string
 	if body != "" {
-		if !skipStrip {
+		if !manualQuote {
 			body = stripQuotes(body)
 		}
 		quoted := quoteLines(body)
