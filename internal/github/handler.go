@@ -284,6 +284,9 @@ func (h *Handler) handlePullRequestReview(_ context.Context, e *gh.PullRequestRe
 	if e.GetAction() != "submitted" {
 		return
 	}
+	if e.GetReview().GetUser().GetType() == "Bot" {
+		return
+	}
 	review := e.GetReview()
 	switch review.GetState() {
 	case "approved", "changes_requested", "commented":
