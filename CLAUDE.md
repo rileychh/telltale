@@ -20,10 +20,12 @@ There are no tests or linter configured in this project.
 ## Environment
 
 Configuration via environment variables (see `.env.example`):
+
 - `TELEGRAM_TOKEN`, `TELEGRAM_CHAT_ID` — Telegram bot credentials
 - `GITHUB_WEBHOOK_SECRET` — HMAC-SHA256 webhook validation secret
 - `GITHUB_APP_ID`, `GITHUB_PRIVATE_KEY_PATH` — GitHub App auth
 - `GITHUB_DEFAULT_REPO` — Default repo for autolink lookups (e.g. `owner/repo`), optional
+- `GITHUB_ALLOWED_REPOS` — Comma-separated allowlist of `owner/repo` values; webhooks from any other repo are dropped (logged and 200-acked). Empty = allow all. Recommended in production since GitHub Apps have a single App-level webhook URL, so any installation forwards events here.
 - `PORT` (default 8080), `DATABASE_PATH` (default telltale.db)
 
 ## Architecture

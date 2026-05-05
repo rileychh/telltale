@@ -18,19 +18,34 @@ import (
 var reMediaPlaceholder = regexp.MustCompile(`\[(Image|Table) #\d+\]`)
 
 type Handler struct {
-	secret  []byte
-	tg      *telegram.Bot
-	db      *store.Store
-	gh      *Client
-	reviews *reviewBuffer
+	secret       []byte
+	allowedRepos map[string]bool
+	tg           *telegram.Bot
+	db           *store.Store
+	gh           *Client
+	reviews      *reviewBuffer
 }
 
-func NewHandler(secret string, tg *telegram.Bot, db *store.Store, gh *Client) *Handler {
+// repoEvent is implemented by every webhook event type we dispatch on. All
+// go-github webhook events that carry a repository expose GetRepo().
+type repoEvent interface {
+	GetRepo() *gh.Repository
+}
+
+func NewHandler(secret string, allowedRepos []string, tg *telegram.Bot, db *store.Store, gh *Client) *Handler {
+	var allow map[string]bool
+	if len(allowedRepos) > 0 {
+		allow = make(map[string]bool, len(allowedRepos))
+		for _, r := range allowedRepos {
+			allow[r] = true
+		}
+	}
 	h := &Handler{
-		secret: []byte(secret),
-		tg:     tg,
-		db:     db,
-		gh:     gh,
+		secret:       []byte(secret),
+		allowedRepos: allow,
+		tg:           tg,
+		db:           db,
+		gh:           gh,
 	}
 	h.reviews = newReviewBuffer(func(reviewID int64) {
 		h.flushReview(reviewID)
@@ -105,6 +120,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "invalid payload", http.StatusBadRequest)
 		return
+	}
+
+	if h.allowedRepos != nil {
+		var repo string
+		if re, ok := event.(repoEvent); ok {
+			repo = re.GetRepo().GetFullName()
+		}
+		if !h.allowedRepos[repo] {
+			log.Printf("dropped webhook from disallowed repo %q", repo)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 	}
 
 	ctx := r.Context()

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -24,7 +25,7 @@ func main() {
 	}
 	defer db.Close()
 
-	tg, err := telegram.New(cfg.TelegramToken, cfg.TelegramChatID)
+	tg, err := telegram.New(cfg.TelegramToken, cfg.TelegramChatID, cfg.GitHubAllowedRepos)
 	if err != nil {
 		log.Fatalf("failed to create telegram bot: %v", err)
 	}
@@ -34,7 +35,7 @@ func main() {
 		log.Fatalf("failed to create github client: %v", err)
 	}
 
-	ghHandler := github.NewHandler(cfg.GitHubWebhookSecret, tg, db, ghClient)
+	ghHandler := github.NewHandler(cfg.GitHubWebhookSecret, cfg.GitHubAllowedRepos, tg, db, ghClient)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /webhook/github", ghHandler.ServeHTTP)
@@ -84,6 +85,7 @@ type config struct {
 	GitHubAppID         int64
 	GitHubPrivateKey    []byte
 	GitHubDefaultRepo   string
+	GitHubAllowedRepos  []string
 	DatabasePath        string
 	Port                string
 }
@@ -107,6 +109,7 @@ func loadConfig() config {
 		GitHubAppID:         appID,
 		GitHubPrivateKey:    privateKey,
 		GitHubDefaultRepo:   os.Getenv("GITHUB_DEFAULT_REPO"),
+		GitHubAllowedRepos:  splitAndTrim(os.Getenv("GITHUB_ALLOWED_REPOS"), ","),
 		DatabasePath:        os.Getenv("DATABASE_PATH"),
 		Port:                os.Getenv("PORT"),
 	}
@@ -134,4 +137,18 @@ func loadConfig() config {
 	}
 
 	return cfg
+}
+
+func splitAndTrim(s, sep string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, sep)
+	out := parts[:0]
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

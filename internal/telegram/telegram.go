@@ -28,11 +28,12 @@ type GitHubClient interface {
 type Bot struct {
 	bot            *bot.Bot
 	chatID         int64
+	allowedRepos   map[string]bool
 	autolinkClient AutolinkClient
 	autolinkRepo   string
 }
 
-func New(token string, chatID string) (*Bot, error) {
+func New(token string, chatID string, allowedRepos []string) (*Bot, error) {
 	id, err := strconv.ParseInt(chatID, 10, 64)
 	if err != nil {
 		return nil, fmt.Errorf("invalid chat ID %q: %w", chatID, err)
@@ -43,7 +44,24 @@ func New(token string, chatID string) (*Bot, error) {
 		return nil, fmt.Errorf("create bot: %w", err)
 	}
 
-	return &Bot{bot: b, chatID: id}, nil
+	var allow map[string]bool
+	if len(allowedRepos) > 0 {
+		allow = make(map[string]bool, len(allowedRepos))
+		for _, r := range allowedRepos {
+			allow[r] = true
+		}
+	}
+
+	return &Bot{bot: b, chatID: id, allowedRepos: allow}, nil
+}
+
+// repoAllowed reports whether the bot is configured to route replies to repo.
+// An empty allowlist permits everything (preserves prior behavior).
+func (b *Bot) repoAllowed(repo string) bool {
+	if b.allowedRepos == nil {
+		return true
+	}
+	return b.allowedRepos[repo]
 }
 
 // Send sends an HTML-formatted message to the configured chat and returns the message ID.
@@ -276,6 +294,10 @@ func (b *Bot) handleReply(ctx context.Context, msg *models.Message, db *store.St
 		log.Printf("reply lookup failed: %v", err)
 		return
 	}
+	if !b.repoAllowed(repo) {
+		log.Printf("dropped reply: mapping to disallowed repo %s#%d", repo, issueNumber)
+		return
+	}
 
 	displayName := telegramDisplayName(msg.From)
 	commentBody := buildCommentBody(ctx, gh, msg, displayName, repo, issueNumber, commentID, quoteText, isReviewComment)
@@ -320,6 +342,10 @@ func (b *Bot) handleEdit(ctx context.Context, msg *models.Message, db *store.Sto
 
 	repo, issueNumber, _, newCommentID, _, isReviewComment, err := db.Lookup(msg.ID)
 	if err != nil || newCommentID == 0 {
+		return
+	}
+	if !b.repoAllowed(repo) {
+		log.Printf("dropped edit: mapping to disallowed repo %s#%d", repo, issueNumber)
 		return
 	}
 
