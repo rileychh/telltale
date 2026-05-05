@@ -391,7 +391,7 @@ func buildCommentBody(ctx context.Context, gh GitHubClient, msg *models.Message,
 		manualQuote = true
 	} else if quoteText != "" {
 		body = quoteText
-	} else if commentID > 0 || issueNumber > 0 {
+	} else if commentID > 0 {
 		var err error
 		_, body, err = gh.GetQuoteContext(ctx, repo, issueNumber, commentID, isReviewComment)
 		if err != nil {
