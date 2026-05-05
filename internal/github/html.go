@@ -20,6 +20,7 @@ var (
 	reHeading      = regexp.MustCompile(`(?m)^#{1,6}\s+(.+)$`)
 	reBlockquote   = regexp.MustCompile(`(?m)^>\s?(.*)$`)
 	reCheckbox     = regexp.MustCompile(`(?m)^- \[([ xX*])\] `)
+	reBullet       = regexp.MustCompile(`(?m)^([ \t]*)[*+\-][ \t]+`)
 	reIssueRef     = regexp.MustCompile(`(?:^|[^&\w])#(\d+)\b`)
 	reCommitSHA    = regexp.MustCompile(`\b([0-9a-f]{7,40})\b`)
 	reCodeInLink   = regexp.MustCompile(`(<a [^>]*>)<code>([^<]*)</code>(</a>)`)
@@ -139,6 +140,14 @@ func mdToTelegramHTML(md, repo string) (string, []MediaRef) {
 	// Convert Markdown formatting
 	s = reHeading.ReplaceAllString(s, "<b>$1</b>")
 	s = reBold.ReplaceAllString(s, "<b>$1</b>")
+	s = reCheckbox.ReplaceAllStringFunc(s, func(match string) string {
+		parts := reCheckbox.FindStringSubmatch(match)
+		if parts[1] == " " {
+			return "☐ "
+		}
+		return "☑ "
+	})
+	s = reBullet.ReplaceAllString(s, "${1}• ")
 	s = reItalic.ReplaceAllStringFunc(s, func(match string) string {
 		inner := reItalic.FindStringSubmatch(match)[1]
 		prefix := ""
@@ -150,13 +159,6 @@ func mdToTelegramHTML(md, repo string) (string, []MediaRef) {
 			suffix = string(match[len(match)-1])
 		}
 		return prefix + "<i>" + inner + "</i>" + suffix
-	})
-	s = reCheckbox.ReplaceAllStringFunc(s, func(match string) string {
-		parts := reCheckbox.FindStringSubmatch(match)
-		if parts[1] == " " {
-			return "☐ "
-		}
-		return "☑ "
 	})
 
 	// GitHub autolinks
