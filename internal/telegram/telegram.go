@@ -289,6 +289,9 @@ func (b *Bot) RegisterReplyHandler(mux *http.ServeMux, path string, db *store.St
 }
 
 func (b *Bot) handleReply(ctx context.Context, msg *models.Message, db *store.Store, gh GitHubClient) {
+	if msg.Chat.ID != b.chatID {
+		return
+	}
 	repo, issueNumber, _, commentID, quoteText, isReviewComment, err := db.Lookup(msg.ReplyToMessage.ID)
 	if err != nil {
 		log.Printf("reply lookup failed: %v", err)
@@ -332,6 +335,9 @@ func (b *Bot) handleReply(ctx context.Context, msg *models.Message, db *store.St
 // handleEdit propagates an edit of a tracked Telegram reply to the GitHub
 // comment that was originally created from it.
 func (b *Bot) handleEdit(ctx context.Context, msg *models.Message, db *store.Store, gh GitHubClient) {
+	if msg.Chat.ID != b.chatID {
+		return
+	}
 	// Defense in depth: a bot can never edit a user's reply, and Telegram does
 	// not normally fire edited_message for the bot's own message edits, but
 	// guard against it so a stray update never PATCHes someone else's GitHub
