@@ -292,7 +292,11 @@ func (h *Handler) handlePullRequest(ctx context.Context, e *gh.PullRequestEvent)
 	case "converted_to_draft":
 		header = "⚪ <b>PR converted to draft by " + user + "</b>"
 	case "review_requested":
-		reviewer := escapeHTML(e.GetRequestedReviewer().GetLogin())
+		requested := e.GetRequestedReviewer()
+		if requested.GetType() == "Bot" {
+			return
+		}
+		reviewer := escapeHTML(requested.GetLogin())
 		header = "👀 <b>Review requested from " + reviewer + " by " + user + "</b>"
 	default:
 		return
@@ -408,9 +412,6 @@ func renderIssueComment(issue *gh.Issue, comment *gh.IssueComment, repo string) 
 func (h *Handler) handlePullRequestReview(ctx context.Context, e *gh.PullRequestReviewEvent) {
 	action := e.GetAction()
 	review := e.GetReview()
-	if review.GetUser().GetType() == "Bot" {
-		return
-	}
 
 	if action == "edited" {
 		repo := e.GetRepo().GetFullName()
