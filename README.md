@@ -1,5 +1,7 @@
+<!-- markdownlint-disable no-inline-html -->
+
 <p align="center">
-  <img src="icon.png" width="128" height="128" alt="Telltale">
+  <img src="icon.svg" width="128" height="128" alt="Telltale">
 </p>
 
 # Telltale
