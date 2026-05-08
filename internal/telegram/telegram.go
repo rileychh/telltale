@@ -67,6 +67,9 @@ func (b *Bot) repoAllowed(repo string) bool {
 // Send sends an HTML-formatted message to the configured chat and returns the message ID.
 // If replyTo > 0, the message is sent as a reply to that message.
 func (b *Bot) Send(ctx context.Context, html string, replyTo int) (int, error) {
+	if len([]rune(html)) > 4096 {
+		html = truncateHTML(html, 4096)
+	}
 	msg, err := b.bot.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    b.chatID,
 		Text:      html,
@@ -170,6 +173,9 @@ func (b *Bot) react(ctx context.Context, chatID int64, msgID int, emoji string) 
 
 // EditMessage edits the text of a previously sent text message.
 func (b *Bot) EditMessage(ctx context.Context, msgID int, html string) error {
+	if len([]rune(html)) > 4096 {
+		html = truncateHTML(html, 4096)
+	}
 	_, err := b.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
 		ChatID:    b.chatID,
 		MessageID: msgID,
@@ -581,6 +587,15 @@ func truncateHTML(s string, maxRunes int) string {
 			i += end + 1
 		} else {
 			i++
+		}
+	}
+
+	// If the cut split an HTML entity (e.g. `&am` instead of `&amp;`), drop it.
+	// Safe to run after the tag loop: any incomplete trailing tag has already
+	// been stripped, so the only `&` without a following `;` is in plain text.
+	if amp := strings.LastIndexByte(truncated, '&'); amp != -1 {
+		if !strings.ContainsRune(truncated[amp:], ';') {
+			truncated = truncated[:amp]
 		}
 	}
 
