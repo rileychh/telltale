@@ -12,6 +12,7 @@ var (
 	reCodeBlock    = regexp.MustCompile("(?s)```[a-zA-Z]*\n?(.*?)```")
 	reInline       = regexp.MustCompile("`([^`]+)`")
 	reBold         = regexp.MustCompile(`\*\*(.+?)\*\*`)
+	reStrikethrough = regexp.MustCompile(`~~(.+?)~~`)
 	reItalic       = regexp.MustCompile(`(?:^|[^*])\*([^*]+?)\*(?:[^*]|$)`)
 	reLink         = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
 	reImage        = regexp.MustCompile(`!\[([^\]]*)\]\(([^)]+)\)`)
@@ -140,6 +141,7 @@ func mdToTelegramHTML(md, repo string) (string, []MediaRef) {
 	// Convert Markdown formatting
 	s = reHeading.ReplaceAllString(s, "<b>$1</b>")
 	s = reBold.ReplaceAllString(s, "<b>$1</b>")
+	s = reStrikethrough.ReplaceAllString(s, "<s>$1</s>")
 	s = reCheckbox.ReplaceAllStringFunc(s, func(match string) string {
 		parts := reCheckbox.FindStringSubmatch(match)
 		if parts[1] == " " {
