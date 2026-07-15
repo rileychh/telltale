@@ -157,6 +157,11 @@ func (b *Bot) SendMedia(ctx context.Context, items []MediaItem, caption string, 
 	return msgs[0].ID, nil
 }
 
+// React adds an emoji reaction to a message in the configured chat.
+func (b *Bot) React(ctx context.Context, msgID int, emoji string) {
+	b.react(ctx, b.chatID, msgID, emoji)
+}
+
 // react adds an emoji reaction to a message.
 func (b *Bot) react(ctx context.Context, chatID int64, msgID int, emoji string) {
 	b.bot.SetMessageReaction(ctx, &bot.SetMessageReactionParams{

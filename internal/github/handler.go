@@ -448,6 +448,7 @@ func (h *Handler) handlePullRequestReviewComment(ctx context.Context, e *gh.Pull
 				log.Printf("failed to edit review comment %d: %v", commentID, err)
 				return
 			}
+			h.tg.React(ctx, msgID, "✍")
 			log.Printf("edited single_review_comment msg %d (%s entity %d)", msgID, repo, commentID)
 			return
 		}
@@ -502,6 +503,7 @@ func (h *Handler) refreshConsolidatedReview(ctx context.Context, repo string, pr
 		log.Printf("failed to edit consolidated review %d: %v", reviewID, err)
 		return
 	}
+	h.tg.React(ctx, msgID, "✍")
 	log.Printf("refreshed consolidated review for %s#%d (review %d, msg %d)", repo, pr.GetNumber(), reviewID, msgID)
 }
 
@@ -693,6 +695,7 @@ func (h *Handler) editEntity(ctx context.Context, repo, entityType string, entit
 		log.Printf("failed to edit %s msg %d: %v", entityType, msgID, err)
 		return
 	}
+	h.tg.React(ctx, msgID, "✍")
 	log.Printf("edited %s msg %d (%s entity %d)", entityType, msgID, repo, entityID)
 }
 
