@@ -3,6 +3,8 @@ package telegram
 import (
 	"bytes"
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -267,13 +269,14 @@ func (b *Bot) RegisterReplyHandler(mux *http.ServeMux, path string, db *store.St
 			return
 		}
 
-		// Handle replies to tracked notifications
-		if msg.ReplyToMessage != nil {
-			b.handleReply(ctx, msg, db, gh)
+		// Handle replies to tracked notifications. A reply to an untracked
+		// message (e.g. an ordinary chat message) is not consumed here, so it
+		// falls through to autolink handling below.
+		if msg.ReplyToMessage != nil && b.handleReply(ctx, msg, db, gh) {
 			return
 		}
 
-		// Handle autolinks in non-reply messages
+		// Handle autolinks in non-reply messages and in replies to untracked ones.
 		if b.autolinkClient != nil && b.autolinkRepo != "" {
 			b.handleAutolinks(ctx, msg)
 		}
@@ -299,18 +302,26 @@ func (b *Bot) RegisterReplyHandler(mux *http.ServeMux, path string, db *store.St
 	mux.Handle("POST "+path, b.bot.WebhookHandler())
 }
 
-func (b *Bot) handleReply(ctx context.Context, msg *models.Message, db *store.Store, gh GitHubClient) {
+// handleReply posts a Telegram reply as a GitHub comment when the replied-to
+// message maps to a tracked notification. It reports whether the reply was
+// consumed: false means the reply target is untracked, so the caller should try
+// autolink handling instead.
+func (b *Bot) handleReply(ctx context.Context, msg *models.Message, db *store.Store, gh GitHubClient) bool {
 	if msg.Chat.ID != b.chatID {
-		return
+		return false
 	}
 	repo, issueNumber, _, commentID, quoteText, isReviewComment, err := db.Lookup(msg.ReplyToMessage.ID)
 	if err != nil {
-		log.Printf("reply lookup failed: %v", err)
-		return
+		// No mapping means this is a reply to an ordinary chat message, not a
+		// tracked notification — let autolink handling take over.
+		if !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("reply lookup failed: %v", err)
+		}
+		return false
 	}
 	if !b.repoAllowed(repo) {
 		log.Printf("dropped reply: mapping to disallowed repo %s#%d", repo, issueNumber)
-		return
+		return true
 	}
 
 	displayName := telegramDisplayName(msg.From)
@@ -324,7 +335,7 @@ func (b *Bot) handleReply(ctx context.Context, msg *models.Message, db *store.St
 	}
 	if err != nil {
 		log.Printf("failed to post comment to %s#%d: %v", repo, issueNumber, err)
-		return
+		return true
 	}
 
 	b.react(ctx, msg.Chat.ID, msg.ID, "👀")
@@ -341,6 +352,7 @@ func (b *Bot) handleReply(ctx context.Context, msg *models.Message, db *store.St
 	}
 
 	log.Printf("posted reply from %s to %s#%d", displayName, repo, issueNumber)
+	return true
 }
 
 // handleEdit propagates an edit of a tracked Telegram reply to the GitHub
