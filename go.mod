@@ -3,15 +3,12 @@ module github.com/rileychh/telltale
 go 1.26.1
 
 require (
-	github.com/go-telegram/bot v1.19.0
+	github.com/go-telegram/bot v1.22.0
 	github.com/google/go-github/v69 v69.2.0
 	modernc.org/sqlite v1.46.2
 )
 
-require (
-	golang.org/x/image v0.37.0
-	golang.org/x/text v0.35.0 // indirect
-)
+require golang.org/x/sync v0.20.0 // indirect
 
 require (
 	github.com/bradleyfalzon/ghinstallation/v2 v2.18.0

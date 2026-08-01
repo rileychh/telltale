@@ -52,7 +52,6 @@ func Open(path string) (*Store, error) {
 			entity_type     TEXT NOT NULL,
 			entity_id       INTEGER NOT NULL,
 			telegram_msg_id INTEGER NOT NULL,
-			has_media       BOOLEAN NOT NULL DEFAULT FALSE,
 			PRIMARY KEY (repo, entity_type, entity_id)
 		)
 	`); err != nil {
@@ -116,21 +115,21 @@ func (s *Store) Lookup(telegramMsgID int) (repo string, issueNumber int, isPR bo
 // or inline comment within a consolidated review) with the Telegram message
 // that displays it. Multiple entities may map to the same Telegram message
 // (e.g. all inline comments in a consolidated review).
-func (s *Store) LinkEntity(repo, entityType string, entityID int64, telegramMsgID int, hasMedia bool) error {
+func (s *Store) LinkEntity(repo, entityType string, entityID int64, telegramMsgID int) error {
 	_, err := s.db.Exec(
-		`INSERT OR REPLACE INTO entity_index (repo, entity_type, entity_id, telegram_msg_id, has_media) VALUES (?, ?, ?, ?, ?)`,
-		repo, entityType, entityID, telegramMsgID, hasMedia,
+		`INSERT OR REPLACE INTO entity_index (repo, entity_type, entity_id, telegram_msg_id) VALUES (?, ?, ?, ?)`,
+		repo, entityType, entityID, telegramMsgID,
 	)
 	return err
 }
 
 // LookupEntity returns the Telegram message ID for a GitHub entity. Returns
 // sql.ErrNoRows when there is no link.
-func (s *Store) LookupEntity(repo, entityType string, entityID int64) (telegramMsgID int, hasMedia bool, err error) {
+func (s *Store) LookupEntity(repo, entityType string, entityID int64) (telegramMsgID int, err error) {
 	err = s.db.QueryRow(
-		`SELECT telegram_msg_id, has_media FROM entity_index WHERE repo = ? AND entity_type = ? AND entity_id = ?`,
+		`SELECT telegram_msg_id FROM entity_index WHERE repo = ? AND entity_type = ? AND entity_id = ?`,
 		repo, entityType, entityID,
-	).Scan(&telegramMsgID, &hasMedia)
+	).Scan(&telegramMsgID)
 	return
 }
 

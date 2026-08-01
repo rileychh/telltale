@@ -5,17 +5,12 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"regexp"
-	"strconv"
 	"strings"
 
 	gh "github.com/google/go-github/v69/github"
 	"github.com/rileychh/telltale/internal/store"
-	"github.com/rileychh/telltale/internal/tableimg"
 	"github.com/rileychh/telltale/internal/telegram"
 )
-
-var reMediaPlaceholder = regexp.MustCompile(`\[(Image|Table) #\d+\]`)
 
 type Handler struct {
 	secret       []byte
@@ -53,17 +48,15 @@ func NewHandler(secret string, allowedRepos []string, tg *telegram.Bot, db *stor
 	return h
 }
 
-// send sends an HTML message, using a photo or media group when media is present.
+// send sends a rich Markdown message. If the rich send fails — malformed
+// Markdown, too many blocks, or a media URL Telegram rejects — it falls back to
+// a plain text message so the notification still arrives.
 // If replyTo > 0, the message is sent as a reply to that Telegram message ID.
-func (h *Handler) send(ctx context.Context, html string, refs []MediaRef, replyTo int) (int, error) {
-	media := resolveMedia(refs)
-	if len(media) == 0 {
-		return h.tg.Send(ctx, html, replyTo)
-	}
-	msgID, err := h.tg.SendMedia(ctx, media, html, replyTo)
+func (h *Handler) send(ctx context.Context, md string, replyTo int) (int, error) {
+	msgID, err := h.tg.SendRich(ctx, md, replyTo)
 	if err != nil {
-		log.Printf("failed to send media, falling back to text: %v", err)
-		return h.tg.Send(ctx, html, replyTo)
+		log.Printf("failed to send rich message, falling back to text: %v", err)
+		return h.tg.Send(ctx, escapeHTML(md), replyTo)
 	}
 	return msgID, nil
 }
@@ -71,12 +64,12 @@ func (h *Handler) send(ctx context.Context, html string, refs []MediaRef, replyT
 // sendThreaded sends a notification that replies to the latest prior
 // notification for this issue/PR (if any), then records the new message as
 // the latest for future notifications.
-func (h *Handler) sendThreaded(ctx context.Context, repo string, issueNumber int, html string, refs []MediaRef) (int, error) {
+func (h *Handler) sendThreaded(ctx context.Context, repo string, issueNumber int, md string) (int, error) {
 	replyTo, err := h.db.LookupLatest(repo, issueNumber)
 	if err != nil {
 		log.Printf("failed to look up latest message for %s#%d: %v", repo, issueNumber, err)
 	}
-	msgID, err := h.send(ctx, html, refs, replyTo)
+	msgID, err := h.send(ctx, md, replyTo)
 	if err != nil {
 		return 0, err
 	}
@@ -86,27 +79,11 @@ func (h *Handler) sendThreaded(ctx context.Context, repo string, issueNumber int
 	return msgID, nil
 }
 
-// resolveMedia converts MediaRefs to telegram MediaItems, rendering tables to PNG.
-func resolveMedia(refs []MediaRef) []telegram.MediaItem {
-	var items []telegram.MediaItem
-	tableNum := 0
-	for _, ref := range refs {
-		if ref.URL != "" {
-			items = append(items, telegram.MediaItem{URL: ref.URL})
-		} else if ref.Table != nil {
-			tableNum++
-			data, err := tableimg.Render(*ref.Table)
-			if err != nil {
-				log.Printf("failed to render table: %v", err)
-				continue
-			}
-			items = append(items, telegram.MediaItem{
-				Data: data,
-				Name: fmt.Sprintf("table_%d.png", tableNum),
-			})
-		}
-	}
-	return items
+// escapeHTML escapes text for the plain-text fallback path, which still uses
+// Telegram's regular HTML parse mode.
+func escapeHTML(s string) string {
+	r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
+	return r.Replace(s)
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -161,8 +138,7 @@ func (h *Handler) handleIssue(ctx context.Context, e *gh.IssuesEvent) {
 		if e.GetSender().GetType() == "Bot" {
 			return
 		}
-		html, _ := renderIssueOpened(issue, repo)
-		h.editEntity(ctx, repo, "issue_body", int64(issue.GetNumber()), html)
+		h.editEntity(ctx, repo, "issue_body", int64(issue.GetNumber()), renderIssueOpened(issue, repo))
 		return
 	}
 	if action == "deleted" {
@@ -171,8 +147,7 @@ func (h *Handler) handleIssue(ctx context.Context, e *gh.IssuesEvent) {
 	}
 
 	if action == "opened" {
-		html, media := renderIssueOpened(issue, repo)
-		msgID, err := h.sendThreaded(ctx, repo, issue.GetNumber(), html, media)
+		msgID, err := h.sendThreaded(ctx, repo, issue.GetNumber(), renderIssueOpened(issue, repo))
 		if err != nil {
 			log.Printf("failed to send issue notification: %v", err)
 			return
@@ -181,38 +156,38 @@ func (h *Handler) handleIssue(ctx context.Context, e *gh.IssuesEvent) {
 		if err := h.db.Save(msgID, repo, issue.GetNumber(), false, 0, "", false); err != nil {
 			log.Printf("failed to save message mapping: %v", err)
 		}
-		if err := h.db.LinkEntity(repo, "issue_body", int64(issue.GetNumber()), msgID, len(media) > 0); err != nil {
+		if err := h.db.LinkEntity(repo, "issue_body", int64(issue.GetNumber()), msgID); err != nil {
 			log.Printf("failed to link issue_body: %v", err)
 		}
 		return
 	}
 
-	user := escapeHTML(e.GetSender().GetLogin())
+	user := escapeMarkdown(e.GetSender().GetLogin())
 	var header string
 	switch action {
 	case "closed":
 		switch issue.GetStateReason() {
 		case "not_planned":
-			header = "⚪ <b>Issue closed as not planned by " + user + "</b>"
+			header = "⚪ **Issue closed as not planned by " + user + "**"
 		default:
-			header = "🟣 <b>Issue closed as completed by " + user + "</b>"
+			header = "🟣 **Issue closed as completed by " + user + "**"
 		}
 	case "reopened":
-		header = "🟢 <b>Issue reopened by " + user + "</b>"
+		header = "🟢 **Issue reopened by " + user + "**"
 	case "assigned":
-		assignee := escapeHTML(e.GetAssignee().GetLogin())
-		header = "👤 <b>Issue assigned to " + assignee + " by " + user + "</b>"
+		assignee := escapeMarkdown(e.GetAssignee().GetLogin())
+		header = "👤 **Issue assigned to " + assignee + " by " + user + "**"
 	default:
 		return
 	}
 
-	html := fmt.Sprintf(
-		`%s`+"\n"+`<a href="%s">%s#%d</a>: %s`,
+	md := fmt.Sprintf(
+		"%s\n[%s#%d](%s): %s",
 		header,
-		issue.GetHTMLURL(), repo, issue.GetNumber(), escapeHTML(issue.GetTitle()),
+		repo, issue.GetNumber(), issue.GetHTMLURL(), escapeMarkdown(issue.GetTitle()),
 	)
 
-	msgID, err := h.sendThreaded(ctx, repo, issue.GetNumber(), html, nil)
+	msgID, err := h.sendThreaded(ctx, repo, issue.GetNumber(), md)
 	if err != nil {
 		log.Printf("failed to send issue notification: %v", err)
 		return
@@ -224,25 +199,20 @@ func (h *Handler) handleIssue(ctx context.Context, e *gh.IssuesEvent) {
 	}
 }
 
-// renderIssueOpened produces the HTML and media for the "Issue opened" message
-// in its current state. Used both at opening time and on subsequent body or
-// title edits.
-func renderIssueOpened(issue *gh.Issue, repo string) (string, []MediaRef) {
-	user := escapeHTML(issue.GetUser().GetLogin())
-	html := fmt.Sprintf(
-		"🟢 <b>Issue opened by %s</b>\n<a href=\"%s\">%s#%d</a>: %s",
-		user,
-		issue.GetHTMLURL(), repo, issue.GetNumber(), escapeHTML(issue.GetTitle()),
+// renderIssueOpened produces the Markdown for the "Issue opened" message in its
+// current state. Used both at opening time and on subsequent body or title edits.
+func renderIssueOpened(issue *gh.Issue, repo string) string {
+	md := fmt.Sprintf(
+		"🟢 **Issue opened by %s**\n[%s#%d](%s): %s",
+		escapeMarkdown(issue.GetUser().GetLogin()),
+		repo, issue.GetNumber(), issue.GetHTMLURL(), escapeMarkdown(issue.GetTitle()),
 	)
-	var media []MediaRef
 	if issue.GetUser().GetType() != "Bot" {
 		if body := issue.GetBody(); body != "" {
-			converted, refs := mdToTelegramHTML(body, repo)
-			html += "\n\n" + converted
-			media = refs
+			md += "\n\n" + prepareMarkdown(body, repo)
 		}
 	}
-	return html, media
+	return md
 }
 
 func (h *Handler) handlePullRequest(ctx context.Context, e *gh.PullRequestEvent) {
@@ -254,14 +224,12 @@ func (h *Handler) handlePullRequest(ctx context.Context, e *gh.PullRequestEvent)
 		if e.GetSender().GetType() == "Bot" {
 			return
 		}
-		html, _ := renderPROpened(pr, repo)
-		h.editEntity(ctx, repo, "pr_body", int64(pr.GetNumber()), html)
+		h.editEntity(ctx, repo, "pr_body", int64(pr.GetNumber()), renderPROpened(pr, repo))
 		return
 	}
 
 	if action == "opened" {
-		html, media := renderPROpened(pr, repo)
-		msgID, err := h.sendThreaded(ctx, repo, pr.GetNumber(), html, media)
+		msgID, err := h.sendThreaded(ctx, repo, pr.GetNumber(), renderPROpened(pr, repo))
 		if err != nil {
 			log.Printf("failed to send PR notification: %v", err)
 			return
@@ -270,45 +238,45 @@ func (h *Handler) handlePullRequest(ctx context.Context, e *gh.PullRequestEvent)
 		if err := h.db.Save(msgID, repo, pr.GetNumber(), true, 0, "", false); err != nil {
 			log.Printf("failed to save message mapping: %v", err)
 		}
-		if err := h.db.LinkEntity(repo, "pr_body", int64(pr.GetNumber()), msgID, len(media) > 0); err != nil {
+		if err := h.db.LinkEntity(repo, "pr_body", int64(pr.GetNumber()), msgID); err != nil {
 			log.Printf("failed to link pr_body: %v", err)
 		}
 		return
 	}
 
-	user := escapeHTML(e.GetSender().GetLogin())
+	user := escapeMarkdown(e.GetSender().GetLogin())
 	var header string
 	switch action {
 	case "closed":
 		if pr.GetMerged() {
-			header = "🟣 <b>PR merged by " + user + "</b>"
+			header = "🟣 **PR merged by " + user + "**"
 		} else {
-			header = "🔴 <b>PR closed by " + user + "</b>"
+			header = "🔴 **PR closed by " + user + "**"
 		}
 	case "reopened":
-		header = "🟢 <b>PR reopened by " + user + "</b>"
+		header = "🟢 **PR reopened by " + user + "**"
 	case "ready_for_review":
-		header = "👀 <b>PR ready for review by " + user + "</b>"
+		header = "👀 **PR ready for review by " + user + "**"
 	case "converted_to_draft":
-		header = "⚪ <b>PR converted to draft by " + user + "</b>"
+		header = "⚪ **PR converted to draft by " + user + "**"
 	case "review_requested":
 		requested := e.GetRequestedReviewer()
 		if requested.GetType() == "Bot" {
 			return
 		}
-		reviewer := escapeHTML(requested.GetLogin())
-		header = "👀 <b>Review requested from " + reviewer + " by " + user + "</b>"
+		reviewer := escapeMarkdown(requested.GetLogin())
+		header = "👀 **Review requested from " + reviewer + " by " + user + "**"
 	default:
 		return
 	}
 
-	html := fmt.Sprintf(
-		`%s`+"\n"+`<a href="%s">%s#%d</a>: %s`,
+	md := fmt.Sprintf(
+		"%s\n[%s#%d](%s): %s",
 		header,
-		pr.GetHTMLURL(), repo, pr.GetNumber(), escapeHTML(pr.GetTitle()),
+		repo, pr.GetNumber(), pr.GetHTMLURL(), escapeMarkdown(pr.GetTitle()),
 	)
 
-	msgID, err := h.sendThreaded(ctx, repo, pr.GetNumber(), html, nil)
+	msgID, err := h.sendThreaded(ctx, repo, pr.GetNumber(), md)
 	if err != nil {
 		log.Printf("failed to send PR notification: %v", err)
 		return
@@ -320,31 +288,27 @@ func (h *Handler) handlePullRequest(ctx context.Context, e *gh.PullRequestEvent)
 	}
 }
 
-// renderPROpened produces the HTML and media for the "PR opened" or "PR
-// drafted" message. Used both at opening time and on subsequent body or title
-// edits.
-func renderPROpened(pr *gh.PullRequest, repo string) (string, []MediaRef) {
-	user := escapeHTML(pr.GetUser().GetLogin())
+// renderPROpened produces the Markdown for the "PR opened" or "PR drafted"
+// message. Used both at opening time and on subsequent body or title edits.
+func renderPROpened(pr *gh.PullRequest, repo string) string {
+	user := escapeMarkdown(pr.GetUser().GetLogin())
 	var header string
 	if pr.GetDraft() {
-		header = "⚪ <b>PR drafted by " + user + "</b>"
+		header = "⚪ **PR drafted by " + user + "**"
 	} else {
-		header = "🟢 <b>PR opened by " + user + "</b>"
+		header = "🟢 **PR opened by " + user + "**"
 	}
-	html := fmt.Sprintf(
-		"%s\n<a href=\"%s\">%s#%d</a>: %s",
+	md := fmt.Sprintf(
+		"%s\n[%s#%d](%s): %s",
 		header,
-		pr.GetHTMLURL(), repo, pr.GetNumber(), escapeHTML(pr.GetTitle()),
+		repo, pr.GetNumber(), pr.GetHTMLURL(), escapeMarkdown(pr.GetTitle()),
 	)
-	var media []MediaRef
 	if pr.GetUser().GetType() != "Bot" {
 		if body := pr.GetBody(); body != "" {
-			converted, refs := mdToTelegramHTML(body, repo)
-			html += "\n\n" + converted
-			media = refs
+			md += "\n\n" + prepareMarkdown(body, repo)
 		}
 	}
-	return html, media
+	return md
 }
 
 func (h *Handler) handleIssueComment(ctx context.Context, e *gh.IssueCommentEvent) {
@@ -359,8 +323,7 @@ func (h *Handler) handleIssueComment(ctx context.Context, e *gh.IssueCommentEven
 
 	switch action {
 	case "edited":
-		html, _ := renderIssueComment(issue, comment, repo)
-		h.editEntity(ctx, repo, "issue_comment", comment.GetID(), html)
+		h.editEntity(ctx, repo, "issue_comment", comment.GetID(), renderIssueComment(issue, comment, repo))
 		return
 	case "deleted":
 		h.deleteEntity(ctx, repo, "issue_comment", comment.GetID())
@@ -371,8 +334,7 @@ func (h *Handler) handleIssueComment(ctx context.Context, e *gh.IssueCommentEven
 		return
 	}
 
-	html, media := renderIssueComment(issue, comment, repo)
-	msgID, err := h.sendThreaded(ctx, repo, issue.GetNumber(), html, media)
+	msgID, err := h.sendThreaded(ctx, repo, issue.GetNumber(), renderIssueComment(issue, comment, repo))
 	if err != nil {
 		log.Printf("failed to send comment notification: %v", err)
 		return
@@ -382,31 +344,27 @@ func (h *Handler) handleIssueComment(ctx context.Context, e *gh.IssueCommentEven
 	if err := h.db.Save(msgID, repo, issue.GetNumber(), issue.IsPullRequest(), comment.GetID(), "", false); err != nil {
 		log.Printf("failed to save message mapping: %v", err)
 	}
-	if err := h.db.LinkEntity(repo, "issue_comment", comment.GetID(), msgID, len(media) > 0); err != nil {
+	if err := h.db.LinkEntity(repo, "issue_comment", comment.GetID(), msgID); err != nil {
 		log.Printf("failed to link issue_comment: %v", err)
 	}
 }
 
-// renderIssueComment produces the HTML and media for an issue or PR comment
+// renderIssueComment produces the Markdown for an issue or PR comment
 // notification. Used both at creation and on subsequent edits.
-func renderIssueComment(issue *gh.Issue, comment *gh.IssueComment, repo string) (string, []MediaRef) {
+func renderIssueComment(issue *gh.Issue, comment *gh.IssueComment, repo string) string {
 	kind := "Issue"
 	if issue.IsPullRequest() {
 		kind = "PR"
 	}
-	user := escapeHTML(comment.GetUser().GetLogin())
-	html := fmt.Sprintf(
-		"💬 <b>Comment on %s by %s</b>\n<a href=\"%s\">%s#%d</a>: %s",
-		kind, user,
-		comment.GetHTMLURL(), repo, issue.GetNumber(), escapeHTML(issue.GetTitle()),
+	md := fmt.Sprintf(
+		"💬 **Comment on %s by %s**\n[%s#%d](%s): %s",
+		kind, escapeMarkdown(comment.GetUser().GetLogin()),
+		repo, issue.GetNumber(), comment.GetHTMLURL(), escapeMarkdown(issue.GetTitle()),
 	)
-	var media []MediaRef
 	if body := comment.GetBody(); body != "" {
-		converted, refs := mdToTelegramHTML(body, repo)
-		html += "\n\n" + converted
-		media = refs
+		md += "\n\n" + prepareMarkdown(body, repo)
 	}
-	return html, media
+	return md
 }
 
 func (h *Handler) handlePullRequestReview(ctx context.Context, e *gh.PullRequestReviewEvent) {
@@ -442,9 +400,9 @@ func (h *Handler) handlePullRequestReviewComment(ctx context.Context, e *gh.Pull
 	switch action {
 	case "edited":
 		// Try the single-message path first (sendSingleReviewComment).
-		if msgID, hasMedia, err := h.db.LookupEntity(repo, "single_review_comment", commentID); err == nil {
-			html, _ := renderSingleReviewComment(e.GetPullRequest(), comment, repo)
-			if err := h.tg.EditOrCaption(ctx, msgID, hasMedia, html); err != nil {
+		if msgID, err := h.db.LookupEntity(repo, "single_review_comment", commentID); err == nil {
+			md := renderSingleReviewComment(e.GetPullRequest(), comment, repo)
+			if err := h.tg.EditRich(ctx, msgID, md); err != nil {
 				log.Printf("failed to edit review comment %d: %v", commentID, err)
 				return
 			}
@@ -453,12 +411,12 @@ func (h *Handler) handlePullRequestReviewComment(ctx context.Context, e *gh.Pull
 			return
 		}
 		// Otherwise it may be part of a consolidated review.
-		if _, _, err := h.db.LookupEntity(repo, "consolidated_review_comment", commentID); err == nil {
+		if _, err := h.db.LookupEntity(repo, "consolidated_review_comment", commentID); err == nil {
 			h.refreshConsolidatedReview(ctx, repo, e.GetPullRequest(), comment.GetPullRequestReviewID())
 		}
 		return
 	case "deleted":
-		if msgID, _, err := h.db.LookupEntity(repo, "single_review_comment", commentID); err == nil {
+		if msgID, err := h.db.LookupEntity(repo, "single_review_comment", commentID); err == nil {
 			if err := h.tg.DeleteMessage(ctx, msgID); err != nil {
 				log.Printf("failed to delete telegram message %d: %v", msgID, err)
 				return
@@ -469,7 +427,7 @@ func (h *Handler) handlePullRequestReviewComment(ctx context.Context, e *gh.Pull
 			log.Printf("deleted single_review_comment msg %d (%s entity %d)", msgID, repo, commentID)
 			return
 		}
-		if _, _, err := h.db.LookupEntity(repo, "consolidated_review_comment", commentID); err == nil {
+		if _, err := h.db.LookupEntity(repo, "consolidated_review_comment", commentID); err == nil {
 			// Unlink first so the re-render doesn't re-include this comment
 			// if GitHub still returns it transiently.
 			if err := h.db.UnlinkEntity(repo, "consolidated_review_comment", commentID); err != nil {
@@ -489,7 +447,7 @@ func (h *Handler) handlePullRequestReviewComment(ctx context.Context, e *gh.Pull
 // refreshConsolidatedReview re-fetches a review and its inline comments from
 // GitHub, then re-renders the consolidated Telegram message in place.
 func (h *Handler) refreshConsolidatedReview(ctx context.Context, repo string, pr *gh.PullRequest, reviewID int64) {
-	msgID, hasMedia, err := h.db.LookupEntity(repo, "consolidated_review", reviewID)
+	msgID, err := h.db.LookupEntity(repo, "consolidated_review", reviewID)
 	if err != nil {
 		return
 	}
@@ -498,8 +456,8 @@ func (h *Handler) refreshConsolidatedReview(ctx context.Context, repo string, pr
 		log.Printf("failed to fetch review %d for re-render: %v", reviewID, err)
 		return
 	}
-	html, _ := renderConsolidatedReview(review, comments, pr, repo)
-	if err := h.tg.EditOrCaption(ctx, msgID, hasMedia, html); err != nil {
+	md := renderConsolidatedReview(review, comments, pr, repo)
+	if err := h.tg.EditRich(ctx, msgID, md); err != nil {
 		log.Printf("failed to edit consolidated review %d: %v", reviewID, err)
 		return
 	}
@@ -543,9 +501,7 @@ func (h *Handler) sendConsolidatedReview(p *pendingReview) {
 		comments[i] = ce.GetComment()
 	}
 
-	html, media := renderConsolidatedReview(review, comments, pr, repo)
-
-	msgID, err := h.sendThreaded(ctx, repo, pr.GetNumber(), html, media)
+	msgID, err := h.sendThreaded(ctx, repo, pr.GetNumber(), renderConsolidatedReview(review, comments, pr, repo))
 	if err != nil {
 		log.Printf("failed to send consolidated review for %s#%d: %v", repo, pr.GetNumber(), err)
 		return
@@ -555,12 +511,11 @@ func (h *Handler) sendConsolidatedReview(p *pendingReview) {
 	if err := h.db.Save(msgID, repo, pr.GetNumber(), true, 0, review.GetBody(), false); err != nil {
 		log.Printf("failed to save message mapping: %v", err)
 	}
-	hasMedia := len(media) > 0
-	if err := h.db.LinkEntity(repo, "consolidated_review", review.GetID(), msgID, hasMedia); err != nil {
+	if err := h.db.LinkEntity(repo, "consolidated_review", review.GetID(), msgID); err != nil {
 		log.Printf("failed to link consolidated_review: %v", err)
 	}
 	for _, c := range comments {
-		if err := h.db.LinkEntity(repo, "consolidated_review_comment", c.GetID(), msgID, hasMedia); err != nil {
+		if err := h.db.LinkEntity(repo, "consolidated_review_comment", c.GetID(), msgID); err != nil {
 			log.Printf("failed to link consolidated_review_comment %d: %v", c.GetID(), err)
 		}
 	}
@@ -572,9 +527,7 @@ func (h *Handler) sendSingleReviewComment(e *gh.PullRequestReviewCommentEvent) {
 	pr := e.GetPullRequest()
 	repo := e.GetRepo().GetFullName()
 
-	html, media := renderSingleReviewComment(pr, comment, repo)
-
-	msgID, err := h.sendThreaded(ctx, repo, pr.GetNumber(), html, media)
+	msgID, err := h.sendThreaded(ctx, repo, pr.GetNumber(), renderSingleReviewComment(pr, comment, repo))
 	if err != nil {
 		log.Printf("failed to send review comment notification: %v", err)
 		return
@@ -584,114 +537,94 @@ func (h *Handler) sendSingleReviewComment(e *gh.PullRequestReviewCommentEvent) {
 	if err := h.db.Save(msgID, repo, pr.GetNumber(), true, comment.GetID(), "", true); err != nil {
 		log.Printf("failed to save message mapping: %v", err)
 	}
-	if err := h.db.LinkEntity(repo, "single_review_comment", comment.GetID(), msgID, len(media) > 0); err != nil {
+	if err := h.db.LinkEntity(repo, "single_review_comment", comment.GetID(), msgID); err != nil {
 		log.Printf("failed to link single_review_comment: %v", err)
 	}
 }
 
-// renderSingleReviewComment produces the HTML and media for a single
-// review-comment notification (the non-consolidated path).
-func renderSingleReviewComment(pr *gh.PullRequest, comment *gh.PullRequestComment, repo string) (string, []MediaRef) {
-	user := escapeHTML(comment.GetUser().GetLogin())
+// renderSingleReviewComment produces the Markdown for a single review-comment
+// notification (the non-consolidated path).
+func renderSingleReviewComment(pr *gh.PullRequest, comment *gh.PullRequestComment, repo string) string {
+	user := escapeMarkdown(comment.GetUser().GetLogin())
 	var header string
 	if comment.GetInReplyTo() > 0 {
-		header = "💬 <b>Reply by " + user + "</b>"
+		header = "💬 **Reply by " + user + "**"
 	} else {
-		header = "💬 <b>Review comment by " + user + "</b>"
+		header = "💬 **Review comment by " + user + "**"
 	}
 
-	location := formatCommentLocation(comment)
-	html := fmt.Sprintf(
-		"%s\n<a href=\"%s\">%s#%d</a>: %s\nOn <code>%s</code>:",
+	md := fmt.Sprintf(
+		"%s\n[%s#%d](%s): %s\nOn `%s`:",
 		header,
-		comment.GetHTMLURL(), repo, pr.GetNumber(), escapeHTML(pr.GetTitle()),
-		escapeHTML(location),
+		repo, pr.GetNumber(), comment.GetHTMLURL(), escapeMarkdown(pr.GetTitle()),
+		formatCommentLocation(comment),
 	)
 
-	var media []MediaRef
 	if body := comment.GetBody(); body != "" {
-		converted, refs := mdToTelegramHTML(body, repo)
-		html += "\n\n" + converted
-		media = refs
+		md += "\n\n" + prepareMarkdown(body, repo)
 	}
-	return html, media
+	return md
 }
 
-// renderConsolidatedReview produces the HTML and media for a consolidated
-// review message: the review body + each inline comment, with a "… and N
-// more" tail when the rendering would exceed Telegram's text limit. Used both
-// at first send and on re-render after edits/deletes.
-func renderConsolidatedReview(review *gh.PullRequestReview, comments []*gh.PullRequestComment, pr *gh.PullRequest, repo string) (string, []MediaRef) {
-	reviewer := escapeHTML(review.GetUser().GetLogin())
+// renderConsolidatedReview produces the Markdown for a consolidated review
+// message: the review body + each inline comment, with a "… and N more" tail
+// when the rendering would exceed Telegram's text limit. Used both at first
+// send and on re-render after edits/deletes.
+func renderConsolidatedReview(review *gh.PullRequestReview, comments []*gh.PullRequestComment, pr *gh.PullRequest, repo string) string {
+	reviewer := escapeMarkdown(review.GetUser().GetLogin())
 	var header string
 	switch review.GetState() {
 	case "approved":
-		header = "✅ <b>Approved by " + reviewer + "</b>"
+		header = "✅ **Approved by " + reviewer + "**"
 	case "changes_requested":
-		header = "🛑 <b>Changes Requested by " + reviewer + "</b>"
+		header = "🛑 **Changes Requested by " + reviewer + "**"
 	case "commented":
-		header = "👀 <b>Reviewed by " + reviewer + "</b>"
+		header = "👀 **Reviewed by " + reviewer + "**"
 	}
 
-	html := fmt.Sprintf(
-		"%s\n<a href=\"%s\">%s#%d</a>: %s",
+	md := fmt.Sprintf(
+		"%s\n[%s#%d](%s): %s",
 		header,
-		review.GetHTMLURL(), repo, pr.GetNumber(), escapeHTML(pr.GetTitle()),
+		repo, pr.GetNumber(), review.GetHTMLURL(), escapeMarkdown(pr.GetTitle()),
 	)
 
-	var media []MediaRef
 	if body := review.GetBody(); body != "" && review.GetUser().GetType() != "Bot" {
-		converted, refs := mdToTelegramHTML(body, repo)
-		html += "\n\n" + converted
-		media = refs
+		md += "\n\n" + prepareMarkdown(body, repo)
 	}
 
 	if len(comments) > 0 {
-		html += fmt.Sprintf("\n\n── %d inline comments ──", len(comments))
-		const maxLen = 4000
+		md += fmt.Sprintf("\n\n---\n\n**%d inline comments**", len(comments))
+		// Leave headroom below the rich message limit so the tail below and
+		// any truncation marker still fit.
+		const maxLen = telegram.MaxRichRunes - 768
 		shown := 0
 		for _, comment := range comments {
-			location := formatCommentLocation(comment)
-			entry := fmt.Sprintf("\n\n📝 <code>%s</code>", escapeHTML(location))
+			entry := fmt.Sprintf("\n\n📝 `%s`", formatCommentLocation(comment))
 			if body := comment.GetBody(); body != "" {
-				converted, refs := mdToTelegramHTML(body, repo)
-				entry += "\n" + converted
-				media = append(media, refs...)
+				entry += "\n" + prepareMarkdown(body, repo)
 			}
-			if len([]rune(html))+len([]rune(entry)) > maxLen {
+			if len([]rune(md))+len([]rune(entry)) > maxLen {
 				remaining := len(comments) - shown
-				html += fmt.Sprintf("\n\n… and <a href=\"%s\">%d more</a>",
-					review.GetHTMLURL(), remaining)
+				md += fmt.Sprintf("\n\n… and [%d more](%s)", remaining, review.GetHTMLURL())
 				break
 			}
-			html += entry
+			md += entry
 			shown++
 		}
 	}
 
-	// Renumber media placeholders sequentially across all sections.
-	imgNum := 0
-	html = reMediaPlaceholder.ReplaceAllStringFunc(html, func(match string) string {
-		imgNum++
-		kind := "Image"
-		if strings.Contains(match, "Table") {
-			kind = "Table"
-		}
-		return "[" + kind + " #" + strconv.Itoa(imgNum) + "]"
-	})
-
-	return html, media
+	return md
 }
 
 // editEntity edits the Telegram message linked to a GitHub entity in place.
 // No-ops if the entity has never been linked.
-func (h *Handler) editEntity(ctx context.Context, repo, entityType string, entityID int64, html string) {
-	msgID, hasMedia, err := h.db.LookupEntity(repo, entityType, entityID)
+func (h *Handler) editEntity(ctx context.Context, repo, entityType string, entityID int64, md string) {
+	msgID, err := h.db.LookupEntity(repo, entityType, entityID)
 	if err != nil {
 		// sql.ErrNoRows is the common case; ignore.
 		return
 	}
-	if err := h.tg.EditOrCaption(ctx, msgID, hasMedia, html); err != nil {
+	if err := h.tg.EditRich(ctx, msgID, md); err != nil {
 		log.Printf("failed to edit %s msg %d: %v", entityType, msgID, err)
 		return
 	}
@@ -702,7 +635,7 @@ func (h *Handler) editEntity(ctx context.Context, repo, entityType string, entit
 // deleteEntity removes the Telegram message linked to a GitHub entity and
 // drops all entity_index entries pointing at that message.
 func (h *Handler) deleteEntity(ctx context.Context, repo, entityType string, entityID int64) {
-	msgID, _, err := h.db.LookupEntity(repo, entityType, entityID)
+	msgID, err := h.db.LookupEntity(repo, entityType, entityID)
 	if err != nil {
 		return
 	}

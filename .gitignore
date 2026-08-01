@@ -1,5 +1,6 @@
 /telltale
 telltale.db
 .env
+.env.dev
 .claude/settings.local.json
 *.pem

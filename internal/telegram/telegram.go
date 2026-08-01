@@ -1,7 +1,6 @@
 package telegram
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -100,63 +99,21 @@ func replyParams(replyTo int) *models.ReplyParameters {
 	}
 }
 
-// MediaItem represents a photo to send, either by URL or as raw bytes.
-type MediaItem struct {
-	URL  string // URL-based photo (mutually exclusive with Data)
-	Data []byte // Generated image bytes (mutually exclusive with URL)
-	Name string // Filename for uploaded images
-}
+// MaxRichRunes is Telegram's length limit for a rich message.
+const MaxRichRunes = 32768
 
-// SendMedia sends one or more photos (URL or uploaded bytes) with an HTML caption.
-// If replyTo > 0, the message is sent as a reply to that message.
-func (b *Bot) SendMedia(ctx context.Context, items []MediaItem, caption string, replyTo int) (int, error) {
-	if len([]rune(caption)) > 1024 {
-		caption = truncateHTML(caption, 1024)
-	}
-	if len(items) == 1 {
-		item := items[0]
-		var photo models.InputFile
-		if item.URL != "" {
-			photo = &models.InputFileString{Data: item.URL}
-		} else {
-			photo = &models.InputFileUpload{Filename: item.Name, Data: bytes.NewReader(item.Data)}
-		}
-		msg, err := b.bot.SendPhoto(ctx, &bot.SendPhotoParams{
-			ChatID:          b.chatID,
-			Photo:           photo,
-			Caption:         caption,
-			ParseMode:       models.ParseModeHTML,
-			ReplyParameters: replyParams(replyTo),
-		})
-		if err != nil {
-			return 0, err
-		}
-		return msg.ID, nil
-	}
-	media := make([]models.InputMedia, len(items))
-	for i, item := range items {
-		p := &models.InputMediaPhoto{}
-		if item.URL != "" {
-			p.Media = item.URL
-		} else {
-			p.Media = "attach://" + item.Name
-			p.MediaAttachment = bytes.NewReader(item.Data)
-		}
-		if i == 0 {
-			p.Caption = caption
-			p.ParseMode = models.ParseModeHTML
-		}
-		media[i] = p
-	}
-	msgs, err := b.bot.SendMediaGroup(ctx, &bot.SendMediaGroupParams{
+// SendRich sends a rich message written in Telegram's Markdown and returns the
+// message ID. If replyTo > 0, the message is sent as a reply to that message.
+func (b *Bot) SendRich(ctx context.Context, md string, replyTo int) (int, error) {
+	msg, err := b.bot.SendRichMessage(ctx, &bot.SendRichMessageParams{
 		ChatID:          b.chatID,
-		Media:           media,
+		RichMessage:     models.InputRichMessage{Markdown: truncateMarkdown(md, MaxRichRunes)},
 		ReplyParameters: replyParams(replyTo),
 	})
 	if err != nil {
 		return 0, err
 	}
-	return msgs[0].ID, nil
+	return msg.ID, nil
 }
 
 // React adds an emoji reaction to a message in the configured chat.
@@ -178,51 +135,17 @@ func (b *Bot) react(ctx context.Context, chatID int64, msgID int, emoji string) 
 	})
 }
 
-// EditMessage edits the text of a previously sent text message.
-func (b *Bot) EditMessage(ctx context.Context, msgID int, html string) error {
-	if len([]rune(html)) > 4096 {
-		html = truncateHTML(html, 4096)
-	}
+// EditRich replaces the content of a previously sent rich message.
+func (b *Bot) EditRich(ctx context.Context, msgID int, md string) error {
 	_, err := b.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
-		ChatID:    b.chatID,
-		MessageID: msgID,
-		Text:      html,
-		ParseMode: models.ParseModeHTML,
-		LinkPreviewOptions: &models.LinkPreviewOptions{
-			IsDisabled: bot.True(),
-		},
+		ChatID:      b.chatID,
+		MessageID:   msgID,
+		RichMessage: &models.InputRichMessage{Markdown: truncateMarkdown(md, MaxRichRunes)},
 	})
 	if isNotModified(err) {
 		return nil
 	}
 	return err
-}
-
-// EditCaption edits the caption of a previously sent photo or media group.
-// The caption is truncated to Telegram's 1024-rune limit.
-func (b *Bot) EditCaption(ctx context.Context, msgID int, caption string) error {
-	if len([]rune(caption)) > 1024 {
-		caption = truncateHTML(caption, 1024)
-	}
-	_, err := b.bot.EditMessageCaption(ctx, &bot.EditMessageCaptionParams{
-		ChatID:    b.chatID,
-		MessageID: msgID,
-		Caption:   caption,
-		ParseMode: models.ParseModeHTML,
-	})
-	if isNotModified(err) {
-		return nil
-	}
-	return err
-}
-
-// EditOrCaption edits a text message's text or a media message's caption,
-// dispatching based on hasMedia recorded at send time.
-func (b *Bot) EditOrCaption(ctx context.Context, msgID int, hasMedia bool, content string) error {
-	if hasMedia {
-		return b.EditCaption(ctx, msgID, content)
-	}
-	return b.EditMessage(ctx, msgID, content)
 }
 
 // DeleteMessage deletes a message from the configured chat. A
@@ -558,6 +481,28 @@ func quoteLines(s string) string {
 		lines[i] = "> " + line
 	}
 	return strings.Join(lines, "\n")
+}
+
+// truncateMarkdown truncates a Markdown string to maxRunes runes. It cuts on a
+// line boundary so block constructs stay intact, and closes a fenced code block
+// left open by the cut.
+func truncateMarkdown(s string, maxRunes int) string {
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+
+	// Leave room for the ellipsis and a possible closing fence.
+	truncated := string(runes[:maxRunes-8])
+	if nl := strings.LastIndexByte(truncated, '\n'); nl > 0 {
+		truncated = truncated[:nl]
+	}
+	truncated = strings.TrimRight(truncated, "\n") + "\n…"
+
+	if strings.Count(truncated, "```")%2 != 0 {
+		truncated += "\n```"
+	}
+	return truncated
 }
 
 // truncateHTML truncates an HTML string to maxRunes runes, ensuring no HTML

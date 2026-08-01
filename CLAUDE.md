@@ -35,8 +35,8 @@ Telltale is a GitHub↔Telegram bridge bot. It receives GitHub webhooks, formats
 ### Packages
 
 - **`cmd/telltale`** — Entry point. Loads config, initializes components, sets up HTTP routes (`POST /webhook/github`, `GET /health`, dynamic Telegram webhook), handles graceful shutdown.
-- **`internal/github`** — GitHub webhook handler and API client. Validates webhooks with HMAC-SHA256, processes issue/PR/comment/review events, converts markdown to Telegram HTML. Authenticates as a GitHub App via `ghinstallation`.
-- **`internal/telegram`** — Telegram bot. Sends HTML notifications, handles reply-to-comment flow (looks up GitHub context, posts comment, saves mapping, reacts with 👀). Also handles autolink previews for `#N` and commit SHA references.
+- **`internal/github`** — GitHub webhook handler and API client. Validates webhooks with HMAC-SHA256, processes issue/PR/comment/review events, prepares markdown for Telegram. Authenticates as a GitHub App via `ghinstallation`.
+- **`internal/telegram`** — Telegram bot. Sends notifications as rich messages, handles reply-to-comment flow (looks up GitHub context, posts comment, saves mapping, reacts with 👀). Also handles autolink previews for `#N` and commit SHA references.
 - **`internal/store`** — SQLite store mapping Telegram message IDs → GitHub context (repo, issue number, comment ID). Enables stateful reply routing.
 
 ### Key Flow: Reply Routing
@@ -51,6 +51,19 @@ Telltale is a GitHub↔Telegram bridge bot. It receives GitHub webhooks, formats
 3. For PRs, bot finds the `<!-- pr-preview-comment -->` comment to extract build number and install links
 4. Bot sends a formatted summary (e.g. `#205 fix: title\nBuild 680 ⋅ Install on Android ⋅ iOS skipped`)
 
-### Markdown/HTML Conversion (`internal/github/html.go`)
+### Message Formatting
 
-Regex-based converter from GitHub markdown to Telegram-compatible HTML. Uses a placeholder system to protect code blocks, links, and blockquotes during transformation. Handles autolinks (#refs, commit SHAs), checkboxes, and formatting.
+Notifications are sent with `sendRichMessage` ([Rich Messages](https://core.telegram.org/bots/api#rich-message-formatting-options), Bot API 10.1). Rich Markdown is GitHub Flavored Markdown where possible, so GitHub bodies pass through nearly untouched — headings, tables, ordered and task lists, dividers, `<details>`, code fences and footnotes all render natively. Limits: 32768 characters, 500 blocks, 50 media, 20 table columns.
+
+`internal/github/html.go` is only a preprocessor (`prepareMarkdown`), handling the two things Telegram can't infer:
+
+- **GitHub autolinks** — `#N` and commit SHAs become explicit Markdown links, since Telegram has no repo context and a bare `#N` would be detected as a hashtag. Code spans, existing links and bare URLs are placeholder-protected first, so hex in a URL is never mistaken for a SHA.
+- **Images** — Telegram renders media only as a standalone block, so an image is left as `![](url)` only when it is alone on its line and isn't an SVG. Anything inline or wrapped in a link (badges, typically) collapses to a plain link.
+- **Angle brackets** — Telegram silently discards tags it doesn't recognise, so bare `<T>` or `List<String>` in prose would vanish from the message. Every `<` that doesn't open a supported tag is escaped to `&lt;`; HTML comments are dropped outright, matching how GitHub renders them. Code spans and fences are protected beforehand, so generics inside them are untouched.
+- **Block HTML** — Telegram does not parse Markdown inside block tags (`<table>`, `<ul>`, `<blockquote>`, …), with `<details>` the notable exception. Inside those blocks an image is demoted to an HTML `<a>` anchor rather than a Markdown link, which would otherwise render as literal `[text](url)` *and* break the surrounding table.
+
+HTML tables now pass through and render natively (`colspan`, `rowspan`, `align`), so unlike the old converter they are no longer stripped to bare text. Markdown table cells support inline formatting only — an image in a cell becomes a link, since media can't live inside a table.
+
+`escapeMarkdown` escapes interpolated GitHub data (logins, titles) for message headers. Autolink previews deliberately stay on regular messages with `parse_mode=HTML` — Telegram recommends those for short text, and they keep features like partial quotes.
+
+If a rich send fails (malformed markdown, block limit, rejected media URL), `Handler.send` falls back to a plain HTML text message so the notification still arrives.
