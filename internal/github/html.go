@@ -22,6 +22,15 @@ var (
 	// them into visible text.
 	reHTMLComment = regexp.MustCompile(`(?s)<!--.*?-->`)
 
+	// GitHub alert marker opening a blockquote, e.g. "> [!WARNING]". GitHub
+	// only treats it as an alert on the quote's first line, and matches the
+	// type case-insensitively.
+	reAlert = regexp.MustCompile(`(?i)^(\s*>\s?)\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*$`)
+
+	// A line belonging to a blockquote, used to tell an alert marker that
+	// opens a quote from a literal "[!NOTE]" sitting inside one.
+	reQuoteLine = regexp.MustCompile(`^\s*>`)
+
 	// Tags Telegram renders in a rich message. Anything else is escaped so it
 	// survives as literal text: Telegram silently discards unknown tags, which
 	// would eat prose like "returns List<String>" down to "returns List".
@@ -39,6 +48,17 @@ var (
 // maxMedia is Telegram's per-rich-message limit on media attachments.
 // Images beyond it are rendered as links instead.
 const maxMedia = 50
+
+// alertLabels replaces a GitHub alert marker with a heading line for the same
+// blockquote. The emoji stands in for the icon GitHub draws in the callout,
+// since Telegram has no callout block of its own.
+var alertLabels = map[string]string{
+	"note":      "ℹ️ **Note**",
+	"tip":       "💡 **Tip**",
+	"important": "❗ **Important**",
+	"warning":   "⚠️ **Warning**",
+	"caution":   "🛑 **Caution**",
+}
 
 // prepareMarkdown adapts GitHub-flavored Markdown for Telegram's rich message
 // Markdown, which accepts GFM largely as-is. Only two things need rewriting:
@@ -64,6 +84,7 @@ func prepareMarkdown(md, repo string) string {
 	s = reHTMLComment.ReplaceAllString(s, "")
 	s = escapeUnsupportedTags(s)
 
+	s = rewriteAlerts(s)
 	s = rewriteImages(s)
 
 	// Protect existing links and bare URLs. Their targets routinely contain
@@ -88,6 +109,38 @@ func prepareMarkdown(md, repo string) string {
 	}
 
 	return strings.TrimSpace(s)
+}
+
+// rewriteAlerts turns GitHub alerts into labelled blockquotes. GitHub renders
+// "> [!WARNING]" as a coloured callout with an icon and a title; Telegram has
+// no equivalent block, so the marker becomes the quote's first line instead of
+// showing through as literal "[!WARNING]" text. The blockquote is kept as-is,
+// which leaves the body's own Markdown intact — an <aside> pull quote looks
+// closer to a callout but doesn't parse Markdown inside, and alert bodies
+// routinely carry links and code.
+func rewriteAlerts(s string) string {
+	lines := strings.Split(s, "\n")
+	out := make([]string, 0, len(lines))
+	inQuote := false
+	for i, line := range lines {
+		m := reAlert.FindStringSubmatch(line)
+		if m == nil || inQuote {
+			out = append(out, line)
+			inQuote = reQuoteLine.MatchString(line)
+			continue
+		}
+
+		out = append(out, m[1]+alertLabels[strings.ToLower(m[2])])
+		// Telegram joins consecutive quote lines into one paragraph, which
+		// would run the label into a prose body. An empty quote line keeps it
+		// on a line of its own, as it already lands when the body opens with a
+		// list or a code block.
+		if empty := strings.TrimRight(m[1], " "); i+1 >= len(lines) || strings.TrimSpace(lines[i+1]) != strings.TrimSpace(empty) {
+			out = append(out, empty)
+		}
+		inQuote = true
+	}
+	return strings.Join(out, "\n")
 }
 
 // rewriteImages decides which images become Telegram media blocks. Telegram

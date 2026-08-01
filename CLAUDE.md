@@ -17,6 +17,34 @@ docker compose up --build
 
 There are no tests or linter configured in this project.
 
+## Git
+
+Commit directly to `main`. This repo has no branch or PR workflow.
+
+## Verifying Message Rendering
+
+Telegram is the only real check on how a notification looks — rich Markdown is
+parsed server-side, so the client is the source of truth.
+
+Send to the **"Riley & Telltale"** test supergroup using the scratch bot in
+`.env.dev` (gitignored, separate from the production `.env`):
+
+```bash
+set -a && source .env.dev && set +a && go run ./cmd/telltale
+```
+
+Then read the result back **visually**, in `web.telegram.org/a/`. The
+`mcp__telegram__*` tools can't do it: `list_messages` and `get_message_context`
+return `[empty]` for rich messages, and `search_query` finds nothing even for
+messages known to exist.
+
+A successful send already proves the Markdown parsed into blocks — Telegram
+validates rich structure and returns real errors (e.g.
+`RICH_MESSAGE_TABLE_COLS_TOO_MANY` for more than 20 columns). The screenshot is
+for fidelity, not acceptance.
+
+Never send test traffic to the production chat in `.env`.
+
 ## Environment
 
 Configuration via environment variables (see `.env.example`):
@@ -55,9 +83,10 @@ Telltale is a GitHub↔Telegram bridge bot. It receives GitHub webhooks, formats
 
 Notifications are sent with `sendRichMessage` ([Rich Messages](https://core.telegram.org/bots/api#rich-message-formatting-options), Bot API 10.1). Rich Markdown is GitHub Flavored Markdown where possible, so GitHub bodies pass through nearly untouched — headings, tables, ordered and task lists, dividers, `<details>`, code fences and footnotes all render natively. Limits: 32768 characters, 500 blocks, 50 media, 20 table columns.
 
-`internal/github/html.go` is only a preprocessor (`prepareMarkdown`), handling the two things Telegram can't infer:
+`internal/github/html.go` is only a preprocessor (`prepareMarkdown`), handling what Telegram can't infer:
 
 - **GitHub autolinks** — `#N` and commit SHAs become explicit Markdown links, since Telegram has no repo context and a bare `#N` would be detected as a hashtag. Code spans, existing links and bare URLs are placeholder-protected first, so hex in a URL is never mistaken for a SHA.
+- **GitHub alerts** — `> [!WARNING]` is a GitHub extension, not core GFM, so the marker would show through as literal text. It becomes an emoji-and-bold title line in the same blockquote, followed by an empty quote line so the title doesn't run into a prose body. The blockquote is kept rather than swapped for an `<aside>` pull quote: `<aside>` looks closer to a callout but doesn't parse Markdown inside, and alert bodies routinely carry links and code. Only the five GitHub types are recognised, and only on the quote's first line, so anything GitHub renders literally stays literal here too.
 - **Images** — Telegram renders media only as a standalone block, so an image is left as `![](url)` only when it is alone on its line and isn't an SVG. Anything inline or wrapped in a link (badges, typically) collapses to a plain link.
 - **Angle brackets** — Telegram silently discards tags it doesn't recognise, so bare `<T>` or `List<String>` in prose would vanish from the message. Every `<` that doesn't open a supported tag is escaped to `&lt;`; HTML comments are dropped outright, matching how GitHub renders them. Code spans and fences are protected beforehand, so generics inside them are untouched.
 - **Block HTML** — Telegram does not parse Markdown inside block tags (`<table>`, `<ul>`, `<blockquote>`, …), with `<details>` the notable exception. Inside those blocks an image is demoted to an HTML `<a>` anchor rather than a Markdown link, which would otherwise render as literal `[text](url)` *and* break the surrounding table.
