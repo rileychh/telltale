@@ -2,5 +2,6 @@
 telltale.db
 .env
 .env.dev
+CLAUDE.local.md
 .claude/settings.local.json
 *.pem

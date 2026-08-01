@@ -23,27 +23,9 @@ Commit directly to `main`. This repo has no branch or PR workflow.
 
 ## Verifying Message Rendering
 
-Telegram is the only real check on how a notification looks — rich Markdown is
-parsed server-side, so the client is the source of truth.
-
-Send to the **"Riley & Telltale"** test supergroup using the scratch bot in
-`.env.dev` (gitignored, separate from the production `.env`):
-
-```bash
-set -a && source .env.dev && set +a && go run ./cmd/telltale
-```
-
-Then read the result back **visually**, in `web.telegram.org/a/`. The
-`mcp__telegram__*` tools can't do it: `list_messages` and `get_message_context`
-return `[empty]` for rich messages, and `search_query` finds nothing even for
-messages known to exist.
-
-A successful send already proves the Markdown parsed into blocks — Telegram
-validates rich structure and returns real errors (e.g.
-`RICH_MESSAGE_TABLE_COLS_TOO_MANY` for more than 20 columns). The screenshot is
-for fidelity, not acceptance.
-
-Never send test traffic to the production chat in `.env`.
+Rich Markdown is parsed server-side, so a Telegram client is the only real check
+on how a notification looks. See `CLAUDE.local.md` for the scratch bot and the
+read-back procedure. Never send test traffic to the production chat in `.env`.
 
 ## Environment
 
