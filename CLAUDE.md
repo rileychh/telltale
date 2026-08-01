@@ -10,9 +10,6 @@ set -a && source .env && set +a && go run ./cmd/telltale
 
 # Build binary
 go build ./cmd/telltale
-
-# Docker
-docker compose up --build
 ```
 
 There are no tests or linter configured in this project.

@@ -54,11 +54,7 @@ from any other repo are dropped.
 ## Run
 
 ```sh
-# Local
 set -a && source .env && set +a && go run ./cmd/telltale
-
-# Docker
-docker compose up
 ```
 
 ## Deploy
