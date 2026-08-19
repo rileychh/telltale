@@ -593,15 +593,15 @@ func renderConsolidatedReview(review *gh.PullRequestReview, comments []*gh.PullR
 	}
 
 	if len(comments) > 0 {
-		md += fmt.Sprintf("\n\n---\n\n**%d inline comments**", len(comments))
+		md += fmt.Sprintf("\n\n**%d inline comments**", len(comments))
 		// Leave headroom below the rich message limit so the tail below and
 		// any truncation marker still fit.
 		const maxLen = telegram.MaxRichRunes - 768
 		shown := 0
 		for _, comment := range comments {
-			entry := fmt.Sprintf("\n\n📝 `%s`", formatCommentLocation(comment))
+			entry := fmt.Sprintf("\n\n---\n\n📝 `%s`", formatCommentLocation(comment))
 			if body := comment.GetBody(); body != "" {
-				entry += "\n" + prepareMarkdown(body, repo)
+				entry += "\n\n" + prepareMarkdown(body, repo)
 			}
 			if len([]rune(md))+len([]rune(entry)) > maxLen {
 				remaining := len(comments) - shown
