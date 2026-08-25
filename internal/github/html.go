@@ -231,12 +231,13 @@ func rewriteImages(s string) string {
 	return strings.Join(lines, "\n")
 }
 
-// imageAlt renders an image Telegram cannot fetch or decode as its alt text.
+// imageAlt preserves the pre-rich-message fallback: an italicized
+// "[Image: alt text]" placeholder, or "[Image]" when no alt text exists.
 func imageAlt(alt string) string {
 	if alt == "" {
-		return "Image"
+		return "*[Image]*"
 	}
-	return alt
+	return "*[Image: " + escapeMarkdown(alt) + "]*"
 }
 
 // imageLink renders an image that can't be a media block as a Markdown link.
