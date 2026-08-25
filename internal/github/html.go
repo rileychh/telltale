@@ -145,9 +145,8 @@ func rewriteAlerts(s string) string {
 
 // rewriteImages decides which images become Telegram media blocks. Telegram
 // renders media only when it is a block of its own, so an image is kept as
-// media only when it is the entire content of its line; anything inline or
-// wrapped in a link becomes a plain link instead. SVGs are always linked, as
-// Telegram has no media type for them.
+// media only when it is the entire content of its line. Images Telegram cannot
+// render become alt text; inline, linked, and over-budget images become links.
 func rewriteImages(s string) string {
 	mediaCount := 0
 	blockDepth := 0
@@ -179,24 +178,29 @@ func rewriteImages(s string) string {
 			continue
 		}
 
-		// An image alone on its line stays media, as long as there is budget
-		// left and Telegram can render the format.
+		// An image alone on its line stays media when Telegram can render it
+		// and there is budget left. Unrenderable images become alt text so a
+		// rejected media URL cannot force the whole message to plain text.
 		if m := reImage.FindStringSubmatch(trimmed); m != nil && m[0] == trimmed {
-			if mediaCount < maxMedia && isRenderableMedia(m[2]) {
+			if !isRenderableMedia(m[2]) {
+				lines[i] = imageAlt(m[1])
+			} else if mediaCount < maxMedia {
 				mediaCount++
-				continue
+			} else {
+				lines[i] = imageLink(m[1], m[2])
 			}
-			lines[i] = imageLink(m[1], m[2])
 			continue
 		}
 		if m := reHTMLImg.FindStringSubmatch(trimmed); m != nil && m[0] == trimmed {
 			alt := altOf(trimmed)
-			if mediaCount < maxMedia && isRenderableMedia(m[1]) {
+			if !isRenderableMedia(m[1]) {
+				lines[i] = imageAlt(alt)
+			} else if mediaCount < maxMedia {
 				lines[i] = fmt.Sprintf("![%s](%s)", alt, m[1])
 				mediaCount++
-				continue
+			} else {
+				lines[i] = imageLink(alt, m[1])
 			}
-			lines[i] = imageLink(alt, m[1])
 			continue
 		}
 
@@ -210,14 +214,29 @@ func rewriteImages(s string) string {
 		})
 		lines[i] = reImage.ReplaceAllStringFunc(lines[i], func(match string) string {
 			parts := reImage.FindStringSubmatch(match)
+			if !isRenderableMedia(parts[2]) {
+				return imageAlt(parts[1])
+			}
 			return imageLink(parts[1], parts[2])
 		})
 		lines[i] = reHTMLImg.ReplaceAllStringFunc(lines[i], func(match string) string {
-			return imageLink(altOf(match), reHTMLImg.FindStringSubmatch(match)[1])
+			parts := reHTMLImg.FindStringSubmatch(match)
+			if !isRenderableMedia(parts[1]) {
+				return imageAlt(altOf(match))
+			}
+			return imageLink(altOf(match), parts[1])
 		})
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+// imageAlt renders an image Telegram cannot fetch or decode as its alt text.
+func imageAlt(alt string) string {
+	if alt == "" {
+		return "Image"
+	}
+	return alt
 }
 
 // imageLink renders an image that can't be a media block as a Markdown link.
@@ -266,10 +285,25 @@ func altOf(imgTag string) string {
 	return ""
 }
 
-// isRenderableMedia reports whether Telegram can display the URL as media.
-// Telegram picks the media type from the MIME type and URL, and has none for SVG.
-func isRenderableMedia(url string) bool {
-	return !strings.HasSuffix(strings.ToLower(url), ".svg")
+// isRenderableMedia reports whether a URL path names a raster format Telegram
+// can display. Ambiguous extensionless URLs are deliberately reduced to alt
+// text rather than risking rejection of the entire rich message.
+func isRenderableMedia(rawURL string) bool {
+	path := rawURL
+	if i := strings.IndexAny(path, "?#"); i >= 0 {
+		path = path[:i]
+	}
+	lower := strings.ToLower(path)
+	switch {
+	case strings.HasSuffix(lower, ".jpg"),
+		strings.HasSuffix(lower, ".jpeg"),
+		strings.HasSuffix(lower, ".png"),
+		strings.HasSuffix(lower, ".gif"),
+		strings.HasSuffix(lower, ".webp"):
+		return true
+	default:
+		return false
+	}
 }
 
 // escapeMarkdown escapes text interpolated into a rich Markdown message.
@@ -288,7 +322,6 @@ func escapeMarkdown(s string) string {
 		"[", `\[`,
 		"]", `\]`,
 		"(", `\(`,
-		")", `\)`,
 		"#", `\#`,
 		"|", `\|`,
 		"=", `\=`,
