@@ -13,12 +13,15 @@ import (
 )
 
 type Handler struct {
-	secret       []byte
-	allowedRepos map[string]bool
-	tg           *telegram.Bot
-	db           *store.Store
-	gh           *Client
-	reviews      *reviewBuffer
+	secret         []byte
+	allowedRepos   map[string]bool
+	tg             *telegram.Bot
+	db             *store.Store
+	gh             *Client
+	reviews        *reviewBuffer
+	closures       *closeBuffer
+	reviewRequests *eventBurstBuffer[*gh.PullRequestEvent]
+	assignments    *eventBurstBuffer[*gh.IssuesEvent]
 }
 
 // repoEvent is implemented by every webhook event type we dispatch on. All
@@ -27,7 +30,7 @@ type repoEvent interface {
 	GetRepo() *gh.Repository
 }
 
-func NewHandler(secret string, allowedRepos []string, tg *telegram.Bot, db *store.Store, gh *Client) *Handler {
+func NewHandler(secret string, allowedRepos []string, tg *telegram.Bot, db *store.Store, githubClient *Client) *Handler {
 	var allow map[string]bool
 	if len(allowedRepos) > 0 {
 		allow = make(map[string]bool, len(allowedRepos))
@@ -40,10 +43,19 @@ func NewHandler(secret string, allowedRepos []string, tg *telegram.Bot, db *stor
 		allowedRepos: allow,
 		tg:           tg,
 		db:           db,
-		gh:           gh,
+		gh:           githubClient,
 	}
 	h.reviews = newReviewBuffer(func(reviewID int64) {
 		h.flushReview(reviewID)
+	})
+	h.closures = newCloseBuffer(func(key closeKey) {
+		h.flushClose(key)
+	})
+	h.reviewRequests = newEventBurstBuffer[*gh.PullRequestEvent](func(key eventBurstKey) {
+		h.flushReviewRequests(key)
+	})
+	h.assignments = newEventBurstBuffer[*gh.IssuesEvent](func(key eventBurstKey) {
+		h.flushAssignments(key)
 	})
 	return h
 }
@@ -161,8 +173,28 @@ func (h *Handler) handleIssue(ctx context.Context, e *gh.IssuesEvent) {
 		}
 		return
 	}
+	if action == "closed" {
+		h.closures.addIssue(e)
+		return
+	}
+	if action == "assigned" {
+		h.assignments.add(eventBurstKey{
+			repo:   repo,
+			number: issue.GetNumber(),
+			actor:  e.GetSender().GetLogin(),
+		}, e)
+		return
+	}
 
-	user := escapeMarkdown(e.GetSender().GetLogin())
+	md := renderIssueLifecycle(issue, repo, action, e.GetSender().GetLogin())
+	if md == "" {
+		return
+	}
+	h.sendIssueLifecycle(ctx, repo, issue, md, 0)
+}
+
+func renderIssueLifecycle(issue *gh.Issue, repo, action, actor string) string {
+	user := escapeMarkdown(actor)
 	var header string
 	switch action {
 	case "closed":
@@ -174,19 +206,26 @@ func (h *Handler) handleIssue(ctx context.Context, e *gh.IssuesEvent) {
 		}
 	case "reopened":
 		header = "🟢 **Issue reopened by " + user + "**"
-	case "assigned":
-		assignee := escapeMarkdown(e.GetAssignee().GetLogin())
-		header = "👤 **Issue assigned to " + assignee + " by " + user + "**"
 	default:
-		return
+		return ""
 	}
 
-	md := fmt.Sprintf(
+	return fmt.Sprintf(
 		"%s\n[%s#%d](%s): %s",
 		header,
 		repo, issue.GetNumber(), issue.GetHTMLURL(), escapeMarkdown(issue.GetTitle()),
 	)
+}
 
+func renderIssueClose(issue *gh.Issue, repo, actor, commentBody string) string {
+	md := renderIssueLifecycle(issue, repo, "closed", actor)
+	if commentBody != "" {
+		md += "\n\n" + prepareMarkdown(commentBody, repo)
+	}
+	return md
+}
+
+func (h *Handler) sendIssueLifecycle(ctx context.Context, repo string, issue *gh.Issue, md string, commentID int64) {
 	msgID, err := h.sendThreaded(ctx, repo, issue.GetNumber(), md)
 	if err != nil {
 		log.Printf("failed to send issue notification: %v", err)
@@ -194,8 +233,82 @@ func (h *Handler) handleIssue(ctx context.Context, e *gh.IssuesEvent) {
 	}
 	log.Printf("sent issue notification for %s#%d (msg %d)", repo, issue.GetNumber(), msgID)
 
-	if err := h.db.Save(msgID, repo, issue.GetNumber(), false, 0, "", false); err != nil {
+	if err := h.db.Save(msgID, repo, issue.GetNumber(), false, commentID, "", false); err != nil {
 		log.Printf("failed to save message mapping: %v", err)
+	}
+	if commentID != 0 {
+		if err := h.db.LinkEntity(repo, "issue_closing_comment", commentID, msgID); err != nil {
+			log.Printf("failed to link issue_closing_comment: %v", err)
+		}
+	}
+}
+func (h *Handler) flushAssignments(key eventBurstKey) {
+	events := h.assignments.take(key)
+	if len(events) == 0 {
+		return
+	}
+	md := renderAssignments(events, key)
+	if md == "" {
+		return
+	}
+	h.sendIssueLifecycle(context.Background(), key.repo, events[0].GetIssue(), md, 0)
+}
+
+func renderAssignments(events []*gh.IssuesEvent, key eventBurstKey) string {
+	assignees := make([]string, 0, len(events))
+	seen := make(map[string]bool, len(events))
+	for _, event := range events {
+		assignee := event.GetAssignee().GetLogin()
+		if assignee == "" || seen[assignee] {
+			continue
+		}
+		seen[assignee] = true
+		assignees = append(assignees, escapeMarkdown(assignee))
+	}
+	if len(assignees) == 0 {
+		return ""
+	}
+
+	issue := events[0].GetIssue()
+	return fmt.Sprintf(
+		"👤 **Issue assigned to %s by %s**\n[%s#%d](%s): %s",
+		formatHumanList(assignees), escapeMarkdown(key.actor),
+		key.repo, issue.GetNumber(), issue.GetHTMLURL(), escapeMarkdown(issue.GetTitle()),
+	)
+}
+
+func (h *Handler) flushClose(key closeKey) {
+	p := h.closures.take(key)
+	if p == nil {
+		return
+	}
+
+	var commentID int64
+	var commentBody string
+	if p.comment != nil {
+		commentID = p.comment.GetComment().GetID()
+		commentBody = p.comment.GetComment().GetBody()
+	}
+
+	switch {
+	case p.issue != nil:
+		issue := p.issue.GetIssue()
+		h.sendIssueLifecycle(
+			context.Background(),
+			key.repo,
+			issue,
+			renderIssueClose(issue, key.repo, p.issue.GetSender().GetLogin(), commentBody),
+			commentID,
+		)
+	case p.pullRequest != nil:
+		pr := p.pullRequest.GetPullRequest()
+		h.sendPRLifecycle(
+			context.Background(),
+			key.repo,
+			pr,
+			renderPRClose(pr, key.repo, p.pullRequest.GetSender().GetLogin(), commentBody),
+			commentID,
+		)
 	}
 }
 
@@ -243,29 +356,31 @@ func (h *Handler) handlePullRequest(ctx context.Context, e *gh.PullRequestEvent)
 		}
 		return
 	}
+	if action == "closed" {
+		h.closures.addPullRequest(e)
+		return
+	}
+	if action == "review_requested" {
+		if _, ok := reviewRequestTarget(e); !ok {
+			return
+		}
+		h.reviewRequests.add(eventBurstKey{
+			repo:   repo,
+			number: pr.GetNumber(),
+			actor:  e.GetSender().GetLogin(),
+		}, e)
+		return
+	}
 
 	user := escapeMarkdown(e.GetSender().GetLogin())
 	var header string
 	switch action {
-	case "closed":
-		if pr.GetMerged() {
-			header = "🟣 **PR merged by " + user + "**"
-		} else {
-			header = "🔴 **PR closed by " + user + "**"
-		}
 	case "reopened":
 		header = "🟢 **PR reopened by " + user + "**"
 	case "ready_for_review":
 		header = "👀 **PR ready for review by " + user + "**"
 	case "converted_to_draft":
 		header = "⚪ **PR converted to draft by " + user + "**"
-	case "review_requested":
-		requested := e.GetRequestedReviewer()
-		if requested.GetType() == "Bot" {
-			return
-		}
-		reviewer := escapeMarkdown(requested.GetLogin())
-		header = "👀 **Review requested from " + reviewer + " by " + user + "**"
 	default:
 		return
 	}
@@ -276,6 +391,53 @@ func (h *Handler) handlePullRequest(ctx context.Context, e *gh.PullRequestEvent)
 		repo, pr.GetNumber(), pr.GetHTMLURL(), escapeMarkdown(pr.GetTitle()),
 	)
 
+	h.sendPRLifecycle(ctx, repo, pr, md, 0)
+}
+
+func renderPRClose(pr *gh.PullRequest, repo, actor, commentBody string) string {
+	return renderPRCloseMessage(
+		pr.GetNumber(),
+		pr.GetTitle(),
+		pr.GetHTMLURL(),
+		repo,
+		actor,
+		pr.GetMerged(),
+		commentBody,
+	)
+}
+
+func renderPRCloseFromIssue(issue *gh.Issue, repo, actor, commentBody string) string {
+	links := issue.GetPullRequestLinks()
+	return renderPRCloseMessage(
+		issue.GetNumber(),
+		issue.GetTitle(),
+		issue.GetHTMLURL(),
+		repo,
+		actor,
+		links != nil && links.MergedAt != nil,
+		commentBody,
+	)
+}
+
+func renderPRCloseMessage(number int, title, url, repo, actor string, merged bool, commentBody string) string {
+	action := "closed"
+	icon := "🔴"
+	if merged {
+		action = "merged"
+		icon = "🟣"
+	}
+	md := fmt.Sprintf(
+		"%s **PR %s by %s**\n[%s#%d](%s): %s",
+		icon, action, escapeMarkdown(actor),
+		repo, number, url, escapeMarkdown(title),
+	)
+	if commentBody != "" {
+		md += "\n\n" + prepareMarkdown(commentBody, repo)
+	}
+	return md
+}
+
+func (h *Handler) sendPRLifecycle(ctx context.Context, repo string, pr *gh.PullRequest, md string, commentID int64) {
 	msgID, err := h.sendThreaded(ctx, repo, pr.GetNumber(), md)
 	if err != nil {
 		log.Printf("failed to send PR notification: %v", err)
@@ -283,8 +445,77 @@ func (h *Handler) handlePullRequest(ctx context.Context, e *gh.PullRequestEvent)
 	}
 	log.Printf("sent PR notification for %s#%d (msg %d)", repo, pr.GetNumber(), msgID)
 
-	if err := h.db.Save(msgID, repo, pr.GetNumber(), true, 0, "", false); err != nil {
+	if err := h.db.Save(msgID, repo, pr.GetNumber(), true, commentID, "", false); err != nil {
 		log.Printf("failed to save message mapping: %v", err)
+	}
+	if commentID != 0 {
+		if err := h.db.LinkEntity(repo, "pr_closing_comment", commentID, msgID); err != nil {
+			log.Printf("failed to link pr_closing_comment: %v", err)
+		}
+	}
+}
+func reviewRequestTarget(e *gh.PullRequestEvent) (string, bool) {
+	if reviewer := e.GetRequestedReviewer(); reviewer != nil {
+		if reviewer.GetType() == "Bot" {
+			return "", false
+		}
+		return reviewer.GetLogin(), reviewer.GetLogin() != ""
+	}
+	if team := e.GetRequestedTeam(); team != nil {
+		name := team.GetName()
+		if name == "" {
+			name = team.GetSlug()
+		}
+		return name, name != ""
+	}
+	return "", false
+}
+
+func (h *Handler) flushReviewRequests(key eventBurstKey) {
+	events := h.reviewRequests.take(key)
+	if len(events) == 0 {
+		return
+	}
+	md := renderReviewRequests(events, key)
+	if md == "" {
+		return
+	}
+	h.sendPRLifecycle(context.Background(), key.repo, events[0].GetPullRequest(), md, 0)
+}
+
+func renderReviewRequests(events []*gh.PullRequestEvent, key eventBurstKey) string {
+	targets := make([]string, 0, len(events))
+	seen := make(map[string]bool, len(events))
+	for _, event := range events {
+		target, ok := reviewRequestTarget(event)
+		if !ok || seen[target] {
+			continue
+		}
+		seen[target] = true
+		targets = append(targets, escapeMarkdown(target))
+	}
+	if len(targets) == 0 {
+		return ""
+	}
+
+	pr := events[0].GetPullRequest()
+	return fmt.Sprintf(
+		"👀 **Review requested from %s by %s**\n[%s#%d](%s): %s",
+		formatHumanList(targets), escapeMarkdown(key.actor),
+		key.repo, pr.GetNumber(), pr.GetHTMLURL(), escapeMarkdown(pr.GetTitle()),
+	)
+}
+
+func formatHumanList(items []string) string {
+	switch len(items) {
+	case 0:
+		return ""
+	case 1:
+		return items[0]
+	case 2:
+		return items[0] + " and " + items[1]
+	default:
+		return strings.Join(items[:len(items)-1], ", ") + ", and " + items[len(items)-1]
 	}
 }
 
@@ -323,14 +554,23 @@ func (h *Handler) handleIssueComment(ctx context.Context, e *gh.IssueCommentEven
 
 	switch action {
 	case "edited":
+		if h.editClosingComment(ctx, repo, issue, comment) {
+			return
+		}
 		h.editEntity(ctx, repo, "issue_comment", comment.GetID(), renderIssueComment(issue, comment, repo))
 		return
 	case "deleted":
+		if h.removeClosingComment(ctx, repo, issue, comment) {
+			return
+		}
 		h.deleteEntity(ctx, repo, "issue_comment", comment.GetID())
 		return
 	case "created":
 		// fall through
 	default:
+		return
+	}
+	if h.closures.addComment(e) {
 		return
 	}
 
@@ -373,7 +613,7 @@ func (h *Handler) handlePullRequestReview(ctx context.Context, e *gh.PullRequest
 
 	if action == "edited" {
 		repo := e.GetRepo().GetFullName()
-		h.refreshConsolidatedReview(ctx, repo, e.GetPullRequest(), review.GetID())
+		h.refreshConsolidatedReview(ctx, repo, e.GetPullRequest(), review.GetID(), true)
 		return
 	}
 
@@ -412,7 +652,7 @@ func (h *Handler) handlePullRequestReviewComment(ctx context.Context, e *gh.Pull
 		}
 		// Otherwise it may be part of a consolidated review.
 		if _, err := h.db.LookupEntity(repo, "consolidated_review_comment", commentID); err == nil {
-			h.refreshConsolidatedReview(ctx, repo, e.GetPullRequest(), comment.GetPullRequestReviewID())
+			h.refreshConsolidatedReview(ctx, repo, e.GetPullRequest(), comment.GetPullRequestReviewID(), true)
 		}
 		return
 	case "deleted":
@@ -433,7 +673,7 @@ func (h *Handler) handlePullRequestReviewComment(ctx context.Context, e *gh.Pull
 			if err := h.db.UnlinkEntity(repo, "consolidated_review_comment", commentID); err != nil {
 				log.Printf("failed to unlink consolidated_review_comment %d: %v", commentID, err)
 			}
-			h.refreshConsolidatedReview(ctx, repo, e.GetPullRequest(), comment.GetPullRequestReviewID())
+			h.refreshConsolidatedReview(ctx, repo, e.GetPullRequest(), comment.GetPullRequestReviewID(), false)
 		}
 		return
 	case "created":
@@ -446,7 +686,7 @@ func (h *Handler) handlePullRequestReviewComment(ctx context.Context, e *gh.Pull
 
 // refreshConsolidatedReview re-fetches a review and its inline comments from
 // GitHub, then re-renders the consolidated Telegram message in place.
-func (h *Handler) refreshConsolidatedReview(ctx context.Context, repo string, pr *gh.PullRequest, reviewID int64) {
+func (h *Handler) refreshConsolidatedReview(ctx context.Context, repo string, pr *gh.PullRequest, reviewID int64, markEdited bool) {
 	msgID, err := h.db.LookupEntity(repo, "consolidated_review", reviewID)
 	if err != nil {
 		return
@@ -461,7 +701,11 @@ func (h *Handler) refreshConsolidatedReview(ctx context.Context, repo string, pr
 		log.Printf("failed to edit consolidated review %d: %v", reviewID, err)
 		return
 	}
-	h.tg.React(ctx, msgID, "✍")
+	if markEdited {
+		h.tg.React(ctx, msgID, "✍")
+	} else if err := h.tg.ClearReaction(ctx, msgID); err != nil {
+		log.Printf("failed to clear edit reaction from consolidated review msg %d: %v", msgID, err)
+	}
 	log.Printf("refreshed consolidated review for %s#%d (review %d, msg %d)", repo, pr.GetNumber(), reviewID, msgID)
 }
 
@@ -614,6 +858,53 @@ func renderConsolidatedReview(review *gh.PullRequestReview, comments []*gh.PullR
 	}
 
 	return md
+}
+
+func (h *Handler) editClosingComment(ctx context.Context, repo string, issue *gh.Issue, comment *gh.IssueComment) bool {
+	entityType := "issue_closing_comment"
+	md := renderIssueClose(issue, repo, comment.GetUser().GetLogin(), comment.GetBody())
+	if issue.IsPullRequest() {
+		entityType = "pr_closing_comment"
+		md = renderPRCloseFromIssue(issue, repo, comment.GetUser().GetLogin(), comment.GetBody())
+	}
+
+	msgID, err := h.db.LookupEntity(repo, entityType, comment.GetID())
+	if err != nil {
+		return false
+	}
+	if err := h.tg.EditRich(ctx, msgID, md); err != nil {
+		log.Printf("failed to edit %s msg %d: %v", entityType, msgID, err)
+		return true
+	}
+	h.tg.React(ctx, msgID, "✍")
+	log.Printf("edited %s msg %d (%s entity %d)", entityType, msgID, repo, comment.GetID())
+	return true
+}
+
+func (h *Handler) removeClosingComment(ctx context.Context, repo string, issue *gh.Issue, comment *gh.IssueComment) bool {
+	entityType := "issue_closing_comment"
+	md := renderIssueClose(issue, repo, comment.GetUser().GetLogin(), "")
+	if issue.IsPullRequest() {
+		entityType = "pr_closing_comment"
+		md = renderPRCloseFromIssue(issue, repo, comment.GetUser().GetLogin(), "")
+	}
+
+	msgID, err := h.db.LookupEntity(repo, entityType, comment.GetID())
+	if err != nil {
+		return false
+	}
+	if err := h.tg.EditRich(ctx, msgID, md); err != nil {
+		log.Printf("failed to remove %s from msg %d: %v", entityType, msgID, err)
+		return true
+	}
+	if err := h.tg.ClearReaction(ctx, msgID); err != nil {
+		log.Printf("failed to clear edit reaction from %s msg %d: %v", entityType, msgID, err)
+	}
+	if err := h.db.UnlinkEntity(repo, entityType, comment.GetID()); err != nil {
+		log.Printf("failed to unlink %s: %v", entityType, err)
+	}
+	log.Printf("removed %s from msg %d (%s entity %d)", entityType, msgID, repo, comment.GetID())
+	return true
 }
 
 // editEntity edits the Telegram message linked to a GitHub entity in place.

@@ -21,8 +21,8 @@ Commit directly to `main`. This repo has no branch or PR workflow.
 ## Verifying Message Rendering
 
 Rich Markdown is parsed server-side, so a Telegram client is the only real check
-on how a notification looks. See `CLAUDE.local.md` for the scratch bot and the
-read-back procedure. Never send test traffic to the production chat in `.env`.
+on how a notification looks. Never send test traffic to the production chat in
+`.env`.
 
 ## Environment
 

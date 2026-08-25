@@ -121,6 +121,15 @@ func (b *Bot) React(ctx context.Context, msgID int, emoji string) {
 	b.react(ctx, b.chatID, msgID, emoji)
 }
 
+// ClearReaction removes this bot's reaction from a message.
+func (b *Bot) ClearReaction(ctx context.Context, msgID int) error {
+	_, err := b.bot.SetMessageReaction(ctx, &bot.SetMessageReactionParams{
+		ChatID:    b.chatID,
+		MessageID: msgID,
+	})
+	return err
+}
+
 // react adds an emoji reaction to a message.
 func (b *Bot) react(ctx context.Context, chatID int64, msgID int, emoji string) {
 	b.bot.SetMessageReaction(ctx, &bot.SetMessageReactionParams{
