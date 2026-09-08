@@ -2,6 +2,7 @@ package github
 
 import (
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 )
@@ -178,8 +179,9 @@ func rewriteImages(s string) string {
 			continue
 		}
 
-		// An image alone on its line stays media when Telegram can render it
-		// and there is budget left. Unrenderable images become alt text so a
+		// An image alone on its line stays media when its URL identifies a
+		// supported raster format or a GitHub user attachment and there is
+		// budget left. Ambiguous and unsupported images become alt text so a
 		// rejected media URL cannot force the whole message to plain text.
 		if m := reImage.FindStringSubmatch(trimmed); m != nil && m[0] == trimmed {
 			if !isRenderableMedia(m[2]) {
@@ -214,21 +216,47 @@ func rewriteImages(s string) string {
 		})
 		lines[i] = reImage.ReplaceAllStringFunc(lines[i], func(match string) string {
 			parts := reImage.FindStringSubmatch(match)
-			if !isRenderableMedia(parts[2]) {
-				return imageAlt(parts[1])
-			}
 			return imageLink(parts[1], parts[2])
 		})
 		lines[i] = reHTMLImg.ReplaceAllStringFunc(lines[i], func(match string) string {
 			parts := reHTMLImg.FindStringSubmatch(match)
-			if !isRenderableMedia(parts[1]) {
-				return imageAlt(altOf(match))
-			}
 			return imageLink(altOf(match), parts[1])
 		})
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+// demoteImages replaces every remaining media image with a link while leaving
+// image syntax inside code spans and fences untouched. It provides a media-free
+// rich-message retry when Telegram rejects an otherwise eligible attachment.
+func demoteImages(s string) string {
+	var code []string
+	protect := func(re *regexp.Regexp, input string) string {
+		return re.ReplaceAllStringFunc(input, func(match string) string {
+			placeholder := fmt.Sprintf("\x00IMAGECODE%d\x00", len(code))
+			code = append(code, match)
+			return placeholder
+		})
+	}
+	s = protect(reCodeBlock, s)
+	s = protect(reInline, s)
+	s = reLinkedImg.ReplaceAllStringFunc(s, func(match string) string {
+		parts := reLinkedImg.FindStringSubmatch(match)
+		return imageLink(parts[1], parts[2])
+	})
+	s = reImage.ReplaceAllStringFunc(s, func(match string) string {
+		parts := reImage.FindStringSubmatch(match)
+		return imageLink(parts[1], parts[2])
+	})
+	s = reHTMLImg.ReplaceAllStringFunc(s, func(match string) string {
+		parts := reHTMLImg.FindStringSubmatch(match)
+		return imageLink(altOf(match), parts[1])
+	})
+	for i, block := range code {
+		s = strings.Replace(s, fmt.Sprintf("\x00IMAGECODE%d\x00", i), block, 1)
+	}
+	return s
 }
 
 // imageAlt preserves the pre-rich-message fallback: an italicized
@@ -286,21 +314,29 @@ func altOf(imgTag string) string {
 	return ""
 }
 
-// isRenderableMedia reports whether a URL path names a raster format Telegram
-// can display. Ambiguous extensionless URLs are deliberately reduced to alt
-// text rather than risking rejection of the entire rich message.
+// isRenderableMedia reports whether a URL identifies media Telegram can
+// display. Known raster extensions are safe. GitHub user attachments are also
+// safe despite being extensionless because GitHub serves their real MIME type.
+// Other ambiguous URLs are rejected rather than risking the whole rich message.
 func isRenderableMedia(rawURL string) bool {
-	path := rawURL
-	if i := strings.IndexAny(path, "?#"); i >= 0 {
-		path = path[:i]
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
 	}
-	lower := strings.ToLower(path)
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+	lowerPath := strings.ToLower(u.Path)
 	switch {
-	case strings.HasSuffix(lower, ".jpg"),
-		strings.HasSuffix(lower, ".jpeg"),
-		strings.HasSuffix(lower, ".png"),
-		strings.HasSuffix(lower, ".gif"),
-		strings.HasSuffix(lower, ".webp"):
+	case strings.HasSuffix(lowerPath, ".jpg"),
+		strings.HasSuffix(lowerPath, ".jpeg"),
+		strings.HasSuffix(lowerPath, ".png"),
+		strings.HasSuffix(lowerPath, ".gif"),
+		strings.HasSuffix(lowerPath, ".webp"):
+		return true
+	case strings.EqualFold(u.Hostname(), "github.com") &&
+		strings.HasPrefix(u.Path, "/user-attachments/assets/") &&
+		len(strings.TrimPrefix(u.Path, "/user-attachments/assets/")) > 0:
 		return true
 	default:
 		return false

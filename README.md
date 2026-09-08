@@ -23,8 +23,10 @@ rather than as flattened text or screenshots.
 A few GitHub-isms have no Telegram equivalent and are rewritten before sending:
 `#123` and commit SHAs become explicit links, since Telegram has no repo context
 to resolve them against; `> [!WARNING]` alerts become labelled blockquotes; and
-images that aren't alone on their own line collapse to links, because Telegram
-renders media only as a standalone block.
+inline and linked images collapse to links, while standalone raster images and
+GitHub user attachments render as media. Unsupported or ambiguous standalone
+images become alt-text placeholders. If Telegram rejects an eligible
+attachment, the notification is retried as a rich message with image links.
 
 ## Setup
 

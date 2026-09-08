@@ -60,17 +60,38 @@ func NewHandler(secret string, allowedRepos []string, tg *telegram.Bot, db *stor
 	return h
 }
 
-// send sends a rich Markdown message. If the rich send fails — malformed
-// Markdown, too many blocks, or a media URL Telegram rejects — it falls back to
-// a plain text message so the notification still arrives.
+type notificationSender interface {
+	SendRich(context.Context, string, int) (int, error)
+	Send(context.Context, string, int) (int, error)
+}
+
+// send sends a rich Markdown message. If Telegram rejects a media attachment,
+// it retries the rich message with images demoted to links. Malformed Markdown,
+// excessive block counts, and other rich-message failures still fall back to a
+// plain text message so the notification arrives.
 // If replyTo > 0, the message is sent as a reply to that Telegram message ID.
 func (h *Handler) send(ctx context.Context, md string, replyTo int) (int, error) {
-	msgID, err := h.tg.SendRich(ctx, md, replyTo)
-	if err != nil {
-		log.Printf("failed to send rich message, falling back to text: %v", err)
-		return h.tg.Send(ctx, escapeHTML(md), replyTo)
+	return sendNotification(ctx, h.tg, md, replyTo)
+}
+
+func sendNotification(ctx context.Context, sender notificationSender, md string, replyTo int) (int, error) {
+	msgID, err := sender.SendRich(ctx, md, replyTo)
+	if err == nil {
+		return msgID, nil
 	}
-	return msgID, nil
+
+	withoutMedia := demoteImages(md)
+	if withoutMedia != md {
+		log.Printf("failed to send rich message, retrying without media: %v", err)
+		if msgID, retryErr := sender.SendRich(ctx, withoutMedia, replyTo); retryErr == nil {
+			return msgID, nil
+		} else {
+			err = retryErr
+		}
+	}
+
+	log.Printf("failed to send rich message, falling back to text: %v", err)
+	return sender.Send(ctx, escapeHTML(md), replyTo)
 }
 
 // sendThreaded sends a notification that replies to the latest prior
