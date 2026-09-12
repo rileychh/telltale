@@ -62,22 +62,34 @@ func (b *closeBuffer) add(key closeKey, issue *gh.IssuesEvent, pullRequest *gh.P
 	}
 	p.issue = issue
 	p.pullRequest = pullRequest
+	if p.comment != nil {
+		p.timer.Reset(closeSettleTimeout)
+	}
 }
 
-// addComment attaches a created conversation comment only when the matching
-// issue or pull request close is already pending.
-func (b *closeBuffer) addComment(e *gh.IssueCommentEvent) bool {
+// addComment attaches a comment to a pending close. When waitForClose is true,
+// it also creates the pending entry so comment-first delivery can settle.
+func (b *closeBuffer) addComment(e *gh.IssueCommentEvent, waitForClose bool) bool {
 	key := closeEventKey(e.GetRepo().GetFullName(), e.GetIssue().GetNumber())
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	p, ok := b.pending[key]
-	if !ok || (p.issue == nil && p.pullRequest == nil) {
+	if !ok && !waitForClose {
 		return false
 	}
+	if !ok {
+		p = &pendingClose{}
+		b.pending[key] = p
+		p.timer = time.AfterFunc(reviewBufferTimeout, func() {
+			b.flush(key)
+		})
+	}
 	p.comment = e
-	p.timer.Reset(closeSettleTimeout)
+	if p.issue != nil || p.pullRequest != nil {
+		p.timer.Reset(closeSettleTimeout)
+	}
 	return true
 }
 

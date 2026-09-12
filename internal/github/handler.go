@@ -338,6 +338,8 @@ func (h *Handler) flushClose(key closeKey) {
 			renderPRClose(pr, key.repo, p.pullRequest.GetSender().GetLogin(), commentBody),
 			commentID,
 		)
+	case p.comment != nil:
+		h.sendIssueComment(context.Background(), p.comment)
 	}
 }
 
@@ -599,10 +601,22 @@ func (h *Handler) handleIssueComment(ctx context.Context, e *gh.IssueCommentEven
 	default:
 		return
 	}
-	if h.closures.addComment(e) {
+	if h.closures.addComment(e, isClosingComment(issue, comment)) {
 		return
 	}
+	h.sendIssueComment(ctx, e)
+}
 
+func isClosingComment(issue *gh.Issue, comment *gh.IssueComment) bool {
+	closedAt := issue.GetClosedAt()
+	createdAt := comment.GetCreatedAt()
+	return !closedAt.IsZero() && closedAt.Equal(createdAt)
+}
+
+func (h *Handler) sendIssueComment(ctx context.Context, e *gh.IssueCommentEvent) {
+	comment := e.GetComment()
+	issue := e.GetIssue()
+	repo := e.GetRepo().GetFullName()
 	msgID, err := h.sendThreaded(ctx, repo, issue.GetNumber(), renderIssueComment(issue, comment, repo))
 	if err != nil {
 		log.Printf("failed to send comment notification: %v", err)
