@@ -15,7 +15,7 @@ import (
 type Handler struct {
 	secret         []byte
 	allowedRepos   map[string]bool
-	tg             *telegram.Bot
+	tg             notificationBot
 	db             *store.Store
 	gh             *Client
 	reviews        *reviewBuffer
@@ -63,6 +63,14 @@ func NewHandler(secret string, allowedRepos []string, tg *telegram.Bot, db *stor
 type notificationSender interface {
 	SendRich(context.Context, string, int) (int, error)
 	Send(context.Context, string, int) (int, error)
+}
+
+type notificationBot interface {
+	notificationSender
+	EditRich(context.Context, int, string) error
+	React(context.Context, int, string)
+	ClearReaction(context.Context, int) error
+	DeleteMessage(context.Context, int) error
 }
 
 // send sends a rich Markdown message. If Telegram rejects a media attachment,
@@ -653,6 +661,20 @@ func (h *Handler) handlePullRequestReviewComment(ctx context.Context, e *gh.Pull
 	action := e.GetAction()
 	comment := e.GetComment()
 	if comment.GetUser().GetType() == "Bot" {
+		if action != "edited" {
+			return
+		}
+		repo := e.GetRepo().GetFullName()
+		reviewID := comment.GetPullRequestReviewID()
+		msgID, err := h.db.LookupEntity(repo, "consolidated_review", reviewID)
+		if err != nil {
+			return
+		}
+		if err := h.db.LinkEntity(repo, "consolidated_review_comment", comment.GetID(), msgID); err != nil {
+			log.Printf("failed to link consolidated_review_comment %d: %v", comment.GetID(), err)
+		}
+		h.tg.React(ctx, msgID, "✍")
+		log.Printf("marked consolidated review msg %d edited (%s bot comment %d)", msgID, repo, comment.GetID())
 		return
 	}
 	repo := e.GetRepo().GetFullName()
@@ -838,7 +860,7 @@ func renderSingleReviewComment(pr *gh.PullRequest, comment *gh.PullRequestCommen
 func renderConsolidatedReview(review *gh.PullRequestReview, comments []*gh.PullRequestComment, pr *gh.PullRequest, repo string) string {
 	reviewer := escapeMarkdown(review.GetUser().GetLogin())
 	var header string
-	switch review.GetState() {
+	switch strings.ToLower(review.GetState()) {
 	case "approved":
 		header = "✅ **Approved by " + reviewer + "**"
 	case "changes_requested":
